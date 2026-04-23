@@ -437,13 +437,7 @@ window.CanvasLevelEditor = (() => {
       } else {
         if (theme.ground) {
           ctx.fillStyle = theme.ground;
-          const pits = L.obstacles.filter(o => o.type === 'pit').sort((a, b) => a.x - b.x);
-          let x = 0;
-          for (const p of pits) {
-            ctx.fillRect(x + LEFT_PAD, GY, (p.x - (x - LEFT_PAD)), CANVAS_H - GY);
-            x = p.x + p.w + LEFT_PAD;
-          }
-          ctx.fillRect(x, GY, W - x, CANVAS_H - GY);
+          ctx.fillRect(LEFT_PAD, GY, W - LEFT_PAD, CANVAS_H - GY);
         }
       }
 
@@ -1829,8 +1823,8 @@ window.CanvasLevelEditor = (() => {
         mmCtx.fillStyle = col;
         if ('x1' in o) {
           mmCtx.fillRect((o.x1 + LEFT_PAD) * sx, 0, (o.x2 - o.x1) * sx, H);
-        } else if (o.type === 'pit') {
-          mmCtx.fillRect((o.x + LEFT_PAD) * sx, GY * sy, o.w * sx, (CANVAS_H - GY) * sy);
+        } else if (o._bbox) {
+          mmCtx.fillRect(o._bbox[0] * sx, o._bbox[1] * sy, o._bbox[2] * sx, o._bbox[3] * sy);
         } else {
           const xw = 10 * sx, yw = 10 * sy;
           const cx = (o.x + LEFT_PAD) * sx;
