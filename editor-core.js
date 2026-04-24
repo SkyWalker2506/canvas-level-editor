@@ -220,6 +220,7 @@ window.CanvasLevelEditor = (() => {
       state.future.length = 0;
       updateHistoryUI();
       markDirty();
+      emit('historyPush', { label, historyLength: state.history.length });
     };
     const undo = () => {
       if (!state.history.length) return;
@@ -228,13 +229,16 @@ window.CanvasLevelEditor = (() => {
       applySnapshot(state.history.pop());
       render();
       toast('Undo: ' + label);
+      emit('undo', { label });
     };
     const redo = () => {
       if (!state.future.length) return;
+      const label = state.future[state.future.length - 1]?.label || 'change';
       state.history.push(takeSnapshot());
       applySnapshot(state.future.pop());
       render();
       toast('Redo');
+      emit('redo', { label });
     };
     const updateHistoryUI = () => {
       const u = $('btn-undo'); const r = $('btn-redo');
@@ -779,7 +783,8 @@ window.CanvasLevelEditor = (() => {
         total,
         warnings: warnings || [],
         courses: cloneDeep(courses),
-        levels: cloneDeep(state.levels)
+        levels: cloneDeep(state.levels),
+        obstacleCount: Object.values(courses).flat().reduce((n, l) => n + (l.obstacles?.length || 0), 0)
       };
       state.publishHistory.push(entry);
       if (state.publishHistory.length > PUBLISH_HISTORY_MAX) state.publishHistory.shift();
@@ -819,7 +824,7 @@ window.CanvasLevelEditor = (() => {
           <div class="pub-head">
             <strong>${entry.label}</strong>
             ${warnBadge}
-            <span class="pub-count">${entry.total} lvl</span>
+            <span class="pub-count">${entry.total} lvl · ${entry.obstacleCount || 0} obs</span>
           </div>
           <div class="pub-actions">
             <button class="btn btn-mini" data-revert="${realIdx}">Revert</button>
@@ -868,7 +873,28 @@ window.CanvasLevelEditor = (() => {
         const playBtn = canPlay
           ? `<button class="play-btn" data-idx="${idx}" title="Play in game">&#9654;</button>`
           : '';
+        const thumb = document.createElement('canvas');
+        thumb.width = 16; thumb.height = 10;
+        thumb.style.cssText = 'vertical-align:middle;margin-right:4px;border-radius:2px;';
+        try {
+          const tc = thumb.getContext('2d');
+          tc.fillStyle = (lvl.data.theme === 'night' ? '#1a1a2e' : '#87CEEB');
+          tc.fillRect(0, 0, 16, 5);
+          tc.fillStyle = (lvl.data.theme === 'desert' ? '#c8a96e' : '#4a7c3f');
+          tc.fillRect(0, 5, 16, 5);
+          const worldW = lvl.data.worldW || 800;
+          (lvl.data.obstacles || []).forEach(o => {
+            const cx = o.x != null ? o.x : (o.x1 != null ? (o.x1 + o.x2) / 2 : null);
+            const cy = o.y != null ? o.y : null;
+            if (cx == null) return;
+            const px = Math.round((cx / worldW) * 16);
+            const py = cy != null ? Math.round((cy / CANVAS_H) * 10) : 6;
+            tc.fillStyle = TYPE_COLORS[o.type] || '#fff';
+            tc.fillRect(Math.max(0, Math.min(15, px)), Math.max(0, Math.min(9, py)), 2, 2);
+          });
+        } catch (_) {}
         li.innerHTML = `<span class="${chipCls}">${courtTag}</span><span class="name">${name}</span>${playBtn}`;
+        li.insertBefore(thumb, li.firstChild);
         li.title = name;
         li.addEventListener('click', (e) => {
           if (e.target.classList.contains('play-btn')) return;
@@ -1118,6 +1144,7 @@ window.CanvasLevelEditor = (() => {
         L.name = $('in-name').value;
         L.subtitle = $('in-subtitle').value;
         L.worldW = Math.max(400, Math.min(8000, parseInt($('in-worldW').value) || 800));
+        if (L.worldW > 3000) toast('⚠ World width ' + L.worldW + 'px is large — may cause slow rendering', 3000);
         L.time = parseFloat($('in-time').value) || 0;
         L.maxShots = parseInt($('in-maxShots').value) || 4;
         L.starShots = $('in-starShots').value.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
@@ -1250,6 +1277,7 @@ window.CanvasLevelEditor = (() => {
               <button class="btn btn-mini btn-danger" id="bulk-delete" title="Delete all">Delete</button>
             </div>
             <div class="hint">Primary (last-clicked) is the alignment anchor. Shift+click to toggle items.</div>
+            <div class="form-row"><label>Change type</label><select id="bulk-type-change"><option value="">— select —</option>${TYPES.map(t => `<option value="${t}">${t}</option>`).join('')}</select></div>
           </div>`;
         $('bulk-align-x').addEventListener('click', () => bulkAlign('x'));
         $('bulk-align-y').addEventListener('click', () => bulkAlign('y'));
@@ -1258,6 +1286,18 @@ window.CanvasLevelEditor = (() => {
         $('bulk-duplicate').addEventListener('click', () => { copySelection(); pasteClipboard(); });
         $('bulk-save-prefab').addEventListener('click', saveCurrentAsPrefab);
         $('bulk-delete').addEventListener('click', deleteSelected);
+        const btcEl = $('bulk-type-change');
+        if (btcEl) {
+          btcEl.addEventListener('change', () => {
+            const newType = btcEl.value; if (!newType) return;
+            const count = state.selectedObsList.length;
+            if (!confirm(`Change ${count} obstacles to ${newType}?`)) { btcEl.value = ''; return; }
+            const ids = state.selectedObsList.filter(i => i >= 0);
+            pushHistory(true, 'Type change');
+            ids.forEach(i => { lvl.data.obstacles[i].type = newType; });
+            render();
+          });
+        }
         return;
       }
       const o = lvl.data.obstacles[state.selectedObs];
@@ -1265,6 +1305,7 @@ window.CanvasLevelEditor = (() => {
       if (!sch) { if (body) body.innerHTML = '<div class="empty-state">Unknown type: ' + o.type + '</div>'; return; }
       if (info) info.textContent = `${o.type} #${state.selectedObs + 1}`;
       let html = `<div class="props-header"><strong>${o.type}</strong><button class="btn btn-mini btn-danger" id="prop-delete">Delete</button></div>`;
+      html += `<div class="form-row"><label>z-order</label><span>${state.selectedObs + 1} / ${lvl.data.obstacles.length}</span></div>`;
       html += `<div class="action-row">
         <button class="btn btn-mini" id="act-snap-ground" title="Align to ground">Snap Ground</button>
         <button class="btn btn-mini" id="act-mirror" title="Mirror horizontally">Mirror</button>
@@ -1291,7 +1332,9 @@ window.CanvasLevelEditor = (() => {
           }).join('');
           html += `<div class="form-row"><label>${f}</label><select data-field="${f}" data-numeric="${typeof ENUMS[f][0] === 'object'}">${opts}</select></div>`;
         } else if (typeof v === 'number' || numericFields.includes(f)) {
-          html += `<div class="form-row"><label>${f}</label><input type="number" step="any" data-field="${f}" value="${v ?? ''}"></div>`;
+          const rangeHint = config.fieldRanges && config.fieldRanges[f];
+          const rangeAttrs = rangeHint ? ` min="${rangeHint[0]}" max="${rangeHint[1]}" title="${f}: ${rangeHint[0]}–${rangeHint[1]}"` : '';
+          html += `<div class="form-row"><label>${f}</label><input type="number" step="any" data-field="${f}" value="${v ?? ''}"${rangeAttrs}></div>`;
         } else {
           html += `<div class="form-row"><label>${f}</label><input type="text" data-field="${f}" value="${v ?? ''}"></div>`;
         }
@@ -1326,6 +1369,7 @@ window.CanvasLevelEditor = (() => {
       state.selectedObs = -1;
       state.selectedObsList = [];
       state.selectedKind = null;
+      if (config.autoFitOnSelect) fitCanvas();
       saveSettings();
       try {
         if (state._gameWin && !state._gameWin.closed) {
@@ -1364,6 +1408,7 @@ window.CanvasLevelEditor = (() => {
         }
       }
       lvl.data.obstacles.push(o);
+      if (config.onObstaclePlace) { try { config.onObstaclePlace(cloneDeep(o), lvl); } catch(_){} }
       if (lvl.data.obstacles.length > 50) {
         toast('⚠ Level has ' + lvl.data.obstacles.length + ' obstacles — may impact performance', 4000);
       }
@@ -1380,8 +1425,10 @@ window.CanvasLevelEditor = (() => {
         .filter(i => i >= 0)
         .sort((a, b) => b - a);
       if (!ids.length) return;
+      const deleted = ids.map(i => cloneDeep(lvl.data.obstacles[i]));
       pushHistory(true, 'Delete');
       ids.forEach(i => lvl.data.obstacles.splice(i, 1));
+      if (config.onObstacleDelete) { try { config.onObstacleDelete(deleted, lvl); } catch(_){} }
       state.selectedObs = -1;
       state.selectedObsList = [];
       state.selectedKind = null;
@@ -1542,6 +1589,10 @@ window.CanvasLevelEditor = (() => {
         const snapToNeighbor = (val) => {
           if (!wantAlign) return val;
           for (const nx of neighborXs) if (Math.abs(val - nx) <= ALIGN_PX) { state.smartGuideX = nx; return nx; }
+          const ballX = lvl.data.ballStart?.x;
+          if (ballX != null && Math.abs(val - ballX) <= ALIGN_PX) { state.smartGuideX = ballX; return ballX; }
+          const holeX = lvl.data.hole?.x;
+          if (holeX != null && Math.abs(val - holeX) <= ALIGN_PX) { state.smartGuideX = holeX; return holeX; }
           return val;
         };
         let newPrimaryX;
@@ -1659,7 +1710,14 @@ window.CanvasLevelEditor = (() => {
               if (state.lockedObs.has(h.index)) { state.lockedObs.delete(h.index); toast('Unlocked'); }
               else { state.lockedObs.add(h.index); toast('Locked'); }
               render();
-            } },
+            } }
+        );
+        if (Array.isArray(config.contextMenuItems)) {
+          config.contextMenuItems.forEach(ci => {
+            items.push({ label: ci.label, run: () => { try { ci.run(o, lvl.data); } catch(_){} } });
+          });
+        }
+        items.push(
           { sep: true },
           { label: 'Delete', danger: true, run: deleteSelected }
         );
@@ -1740,6 +1798,24 @@ window.CanvasLevelEditor = (() => {
       toast(clipboard.length === 1 ? 'Pasted' : `Pasted ${clipboard.length}`);
     };
 
+    const pasteBelow = () => {
+      const lvl = state.levels[state.currentIdx]; if (!lvl || !clipboard || !clipboard.length) return;
+      pushHistory(true, 'Paste below');
+      const off = state.gridSize;
+      const newIds = [];
+      clipboard.forEach(src => {
+        const o = cloneDeep(src);
+        if ('y' in o) o.y = snap((o.y || 0) + off);
+        lvl.data.obstacles.push(o);
+        newIds.push(lvl.data.obstacles.length - 1);
+      });
+      state.selectedObsList = newIds;
+      state.selectedObs = newIds[newIds.length - 1];
+      state.selectedKind = 'obs';
+      render();
+      toast(clipboard.length === 1 ? 'Pasted below' : `Pasted ${clipboard.length} below`);
+    };
+
     // ---------- Keyboard nudge ----------
     const nudge = (dx, dy) => {
       const lvl = state.levels[state.currentIdx]; if (!lvl) return;
@@ -1771,7 +1847,8 @@ window.CanvasLevelEditor = (() => {
       if (!inField && mod && e.shiftKey && (e.key === 'V')) { e.preventDefault(); pasteAtCenter(); return; }
       if (!inField && mod && !e.shiftKey && (e.key === 'v' || e.key === 'V')) { e.preventDefault(); pasteClipboard(); return; }
       if (!inField && mod && (e.key === 'x' || e.key === 'X')) { e.preventDefault(); copySelection(); deleteSelected(); return; }
-      if (!inField && mod && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); copySelection(); pasteClipboard(); return; }
+      if (!inField && mod && e.shiftKey && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); copySelection(); pasteBelow(); return; }
+      if (!inField && mod && !e.shiftKey && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); copySelection(); pasteClipboard(); return; }
       if (!inField && (e.key === '?' || (e.shiftKey && e.key === '/'))) {
         e.preventDefault();
         const h = $('help-overlay'); if (h) { h.style.display = ''; $('help-close')?.focus(); }
@@ -1792,6 +1869,12 @@ window.CanvasLevelEditor = (() => {
           } else {
             next = e.shiftKey ? n - 1 : 0;
           }
+          // Skip locked obstacles
+          let tries = 0;
+          while (state.lockedObs.has(next) && tries < n) {
+            next = e.shiftKey ? (next - 1 + n) % n : (next + 1) % n;
+            tries++;
+          }
           state.selectedKind = 'obs';
           state.selectedObs = next;
           state.selectedObsList = [next];
@@ -1799,6 +1882,11 @@ window.CanvasLevelEditor = (() => {
           render();
         }
       }
+      if (mod && (e.key === '=' || e.key === '+')) { e.preventDefault(); $('btn-zoom-in')?.click(); return; }
+      if (mod && e.key === '-') { e.preventDefault(); $('btn-zoom-out')?.click(); return; }
+      if (mod && e.key === '0') { e.preventDefault(); fitCanvas(); render(); return; }
+      if (!inField && mod && e.key === 'Home') { e.preventDefault(); selectLevel(0); return; }
+      if (!inField && mod && e.key === 'End') { e.preventDefault(); selectLevel(state.levels.length - 1); return; }
       if (!inField && mod && (e.key === 'n' || e.key === 'N')) { e.preventDefault(); $('btn-new-level')?.click(); return; }
       if (!inField && mod && (e.key === 'a' || e.key === 'A')) {
         e.preventDefault();
@@ -1831,6 +1919,8 @@ window.CanvasLevelEditor = (() => {
         }
         return;
       }
+      if (!inField && e.key === '[') { e.preventDefault(); state.gridSize = Math.max(5, state.gridSize - 5); toast('Grid: ' + state.gridSize + 'px'); saveSettings(); return; }
+      if (!inField && e.key === ']') { e.preventDefault(); state.gridSize = Math.min(100, state.gridSize + 5); toast('Grid: ' + state.gridSize + 'px'); saveSettings(); return; }
       if (inField) return;
       const step = e.shiftKey ? 1 : GRID;
       if (e.key === 'ArrowLeft')  { e.preventDefault(); nudge(-step, 0); return; }
@@ -1891,7 +1981,8 @@ window.CanvasLevelEditor = (() => {
       URL.revokeObjectURL(url);
     });
     $('btn-import').addEventListener('click', () => $('file-import').click());
-    const _importLevels = (arr) => {
+    $('btn-import-merge')?.addEventListener('click', () => $('file-import-merge')?.click());
+    const _importLevels = (arr, mergeMode = false) => {
       if (!Array.isArray(arr)) throw new Error('not an array');
       const valid = arr.filter(item => {
         try {
@@ -1915,11 +2006,16 @@ window.CanvasLevelEditor = (() => {
           if ('y' in o) o.y = clampY(o.y);
         });
       });
-      pushHistory(true, 'Import');
-      state.levels = valid;
-      state.currentIdx = 0;
+      pushHistory(true, mergeMode ? 'Import merge' : 'Import');
+      if (mergeMode) {
+        state.levels = state.levels.concat(valid);
+        state.currentIdx = state.levels.length - valid.length;
+      } else {
+        state.levels = valid;
+        state.currentIdx = 0;
+      }
       render();
-      toast(`Imported ${valid.length} levels${skipped ? ` (${skipped} skipped as invalid)` : ''}`);
+      toast(`Imported ${valid.length} levels${skipped ? ` (${skipped} skipped as invalid)` : ''}${mergeMode ? ' (merged)' : ''}`);
     };
     $('file-import').addEventListener('change', async (e) => {
       const f = e.target.files[0]; if (!f) return;
@@ -1929,6 +2025,17 @@ window.CanvasLevelEditor = (() => {
       } catch (err) { toast('Import failed: ' + err.message); }
       e.target.value = '';
     });
+    const _fileImportMergeEl = $('file-import-merge');
+    if (_fileImportMergeEl) {
+      _fileImportMergeEl.addEventListener('change', async (e) => {
+        const f = e.target.files[0]; if (!f) return;
+        try {
+          const txt = await f.text();
+          _importLevels(JSON.parse(txt), true);
+        } catch (err) { toast('Merge import failed: ' + err.message); }
+        e.target.value = '';
+      });
+    }
     // Drag-and-drop JSON import
     document.body.addEventListener('dragover', (e) => {
       if (e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }
@@ -2443,6 +2550,33 @@ window.CanvasLevelEditor = (() => {
     renderPalette();
     wireConfig();
 
+    // Populate help shortcut list
+    const SHORTCUTS = [
+      ['Ctrl+Z', 'Undo'], ['Ctrl+Y', 'Redo'], ['Ctrl+C', 'Copy'],
+      ['Ctrl+V', 'Paste'], ['Ctrl+Shift+V', 'Paste at center'],
+      ['Ctrl+X', 'Cut'], ['Ctrl+D', 'Duplicate'], ['Ctrl+Shift+D', 'Duplicate below'],
+      ['Ctrl+A', 'Select all'], ['Ctrl+N', 'New level'], ['Ctrl+S', 'Save'],
+      ['Delete/Backspace', 'Delete selected'],
+      ['Arrow keys', 'Nudge (grid)'], ['Shift+Arrow', 'Nudge (1px)'],
+      ['Alt+↑/↓', 'Reorder level'],
+      ['Tab/Shift+Tab', 'Cycle obstacles'],
+      ['Space+drag', 'Pan canvas'],
+      ['1', 'Select tool'], ['2', 'Eraser'], ['3', 'Ball tool'],
+      ['4', 'Hole tool'], ['G', 'Toggle grid'],
+      ['[/]', 'Grid size -/+5'],
+      ['Ctrl+=/-', 'Zoom in/out'], ['Ctrl+0', 'Fit to window'],
+      ['Ctrl+Home/End', 'First/last level'],
+      ['P', 'Play level'], ['F', 'Focus selection'],
+      ['Z', 'Zen mode'], ['?', 'Help'],
+      ['Home', 'Scroll to ball'], ['End', 'Scroll to hole'],
+    ];
+    const helpEl = $('help-shortcuts');
+    if (helpEl) {
+      helpEl.innerHTML = SHORTCUTS.map(([k, v]) =>
+        `<li><kbd>${k}</kbd> <span>${v}</span></li>`
+      ).join('');
+    }
+
     // URL params: ?level=<base64-json> headless mode, ?zen=1
     const __autoParams = new URLSearchParams(location.search);
     const __levelParam = __autoParams.get('level');
@@ -2548,6 +2682,20 @@ window.CanvasLevelEditor = (() => {
         state.levels = cloneDeep(snap.levels);
         state.currentIdx = Math.max(0, Math.min(snap.currentIdx || 0, state.levels.length - 1));
         render();
+      },
+      removeObstacle(index) {
+        const lvl = state.levels[state.currentIdx]; if (!lvl) return false;
+        if (index < 0 || index >= lvl.data.obstacles.length) return false;
+        pushHistory(true, 'Remove obstacle');
+        lvl.data.obstacles.splice(index, 1);
+        render(); return true;
+      },
+      updateObstacle(index, fields) {
+        const lvl = state.levels[state.currentIdx]; if (!lvl) return false;
+        if (index < 0 || index >= lvl.data.obstacles.length) return false;
+        pushHistory(true, 'Update obstacle');
+        Object.assign(lvl.data.obstacles[index], fields);
+        render(); return true;
       }
     };
   }; // end create()
