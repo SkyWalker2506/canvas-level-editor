@@ -1430,7 +1430,7 @@ window.CanvasLevelEditor = (() => {
         if (el && el !== document.activeElement) el.value = v ?? '';
       };
       if (!lvl) {
-        ['in-name','in-subtitle','in-description','in-worldW','in-time','in-maxShots','in-starShots','in-ballX','in-holeX','in-slot'].forEach(id => set(id, ''));
+        ['in-name','in-subtitle','in-description','in-worldW','in-time','in-maxShots','in-starShots','in-starShots-0','in-starShots-1','in-starShots-2','in-ballX','in-holeX','in-slot'].forEach(id => set(id, ''));
         const ic = $('in-court');
         if (ic && ic !== document.activeElement) ic.value = 'null';
         const cn = $('current-level-name');
@@ -1445,6 +1445,10 @@ window.CanvasLevelEditor = (() => {
       set('in-time', L.time);
       set('in-maxShots', L.maxShots);
       set('in-starShots', (L.starShots || []).join(','));
+      const _ss = L.starShots || [];
+      set('in-starShots-0', _ss[0] ?? '');
+      set('in-starShots-1', _ss[1] ?? '');
+      set('in-starShots-2', _ss[2] ?? '');
       set('in-ballX', L.ballStart.x);
       set('in-holeX', L.hole.x);
       const ic = $('in-court');
@@ -1487,7 +1491,16 @@ window.CanvasLevelEditor = (() => {
         if (L.worldW > 3000) toast('⚠ World width ' + L.worldW + 'px is large — may cause slow rendering', 3000);
         L.time = parseFloat($('in-time').value) || 0;
         L.maxShots = parseInt($('in-maxShots').value) || 4;
-        L.starShots = $('in-starShots').value.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+        {
+          const sEl = $('in-starShots');
+          const sSplit = ['in-starShots-0','in-starShots-1','in-starShots-2'].map(id => $(id));
+          if (sSplit.every(el => el)) {
+            L.starShots = sSplit.map(el => parseInt(el.value)).filter(n => !isNaN(n));
+            if (sEl) sEl.value = L.starShots.join(',');
+          } else if (sEl) {
+            L.starShots = sEl.value.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+          }
+        }
         L.ballStart.x = parseInt($('in-ballX').value) || 100;
         L.hole.x = parseInt($('in-holeX').value) || 700;
         const c = $('in-court').value;
@@ -1497,7 +1510,7 @@ window.CanvasLevelEditor = (() => {
         slotWarning();
         render();
       };
-      ['in-name','in-subtitle','in-description','in-worldW','in-time','in-maxShots','in-starShots','in-ballX','in-holeX','in-court','in-slot']
+      ['in-name','in-subtitle','in-description','in-worldW','in-time','in-maxShots','in-starShots','in-starShots-0','in-starShots-1','in-starShots-2','in-ballX','in-holeX','in-court','in-slot']
         .forEach(id => { const el = $(id); if (el) el.addEventListener('input', upd); });
     };
 
@@ -3698,6 +3711,18 @@ window.CanvasLevelEditor = (() => {
       state.currentIdx = 0;
     }
     updateHistoryUI();
+
+    // Editor deep-link back from game: ?editor_course=X&editor_slot=Y
+    try {
+      const _ec = __autoParams.get('editor_course');
+      const _es = __autoParams.get('editor_slot');
+      if (_ec && _es) {
+        const ec = parseInt(_ec, 10);
+        const es = parseInt(_es, 10);
+        const found = state.levels.findIndex(l => l.courtId === ec && l.slot === es);
+        if (found >= 0) state.currentIdx = found;
+      }
+    } catch (_) {}
 
     // First-visit welcome toast
     try {
