@@ -55,6 +55,7 @@ window.CanvasLevelEditor = (() => {
     // ---------- Config with defaults ----------
     const STORAGE_KEY        = config.storageKey        || 'canvas_editor_v1';
     const SYNC_KEY           = config.syncKey           || 'canvas_editor_sync';
+    const PREVIEW_KEY        = config.previewKey        || 'canvas_editor_preview';
     const PUBLISH_HISTORY_KEY= config.publishHistoryKey || 'canvas_editor_publish_history';
     const SETTINGS_KEY       = config.settingsKey       || 'canvas_editor_settings';
     const PREFABS_KEY        = config.prefabsKey        || 'canvas_editor_prefabs';
@@ -1985,7 +1986,7 @@ window.CanvasLevelEditor = (() => {
     // ---------- Play in game ----------
     const writePreview = (lvl) => {
       try {
-        localStorage.setItem('canvas_editor_preview', JSON.stringify({
+        localStorage.setItem(PREVIEW_KEY, JSON.stringify({
           ...lvl.data,
           _courtId: lvl.courtId != null ? lvl.courtId : null
         }));
@@ -2910,7 +2911,7 @@ window.CanvasLevelEditor = (() => {
       if (!confirm('Clear sync? The game will revert to baked levels.')) return;
       clearSync();
     });
-    $('filter-court').addEventListener('change', () => { renderLevelList(); renderSlotGrid(); saveSettings(); });
+    $('filter-court').addEventListener('change', () => { renderLevelList(); renderSlotGrid(); renderPalette(); saveSettings(); });
     $('level-search')?.addEventListener('input', () => renderLevelList());
     // Course-specific export
     $('btn-export-course')?.addEventListener('click', () => {
