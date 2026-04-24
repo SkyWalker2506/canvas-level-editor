@@ -58,6 +58,7 @@ window.CanvasLevelEditor = (() => {
     const PUBLISH_HISTORY_KEY= config.publishHistoryKey || 'canvas_editor_publish_history';
     const SETTINGS_KEY       = config.settingsKey       || 'canvas_editor_settings';
     const PREFABS_KEY        = config.prefabsKey        || 'canvas_editor_prefabs';
+    const BACKUP_KEY         = config.backupKey         || 'canvas_editor_backup_v1';
     const GY                 = config.groundY           ?? 380;
     const CANVAS_H           = config.canvasHeight      ?? 540;
     const SCHEMA             = config.schema            || {};
@@ -70,6 +71,17 @@ window.CanvasLevelEditor = (() => {
 
     const TYPES = Object.keys(SCHEMA);
     const HISTORY_MAX = 50;
+
+    // ---------- Feature 3: Configurable CSS theme variables ----------
+    if (config.theme && typeof config.theme === 'object') {
+      const cssVars = Object.entries(config.theme)
+        .map(([k, v]) => `  ${k}: ${v};`)
+        .join('\n');
+      const styleTag = document.createElement('style');
+      styleTag.id = 'canvas-editor-theme';
+      styleTag.textContent = `:root {\n${cssVars}\n}`;
+      document.head.appendChild(styleTag);
+    }
     const PUBLISH_HISTORY_MAX = 20;
     const LEFT_PAD = 25;
     const GRID = 20; // default grid size (5–100 valid range)
@@ -94,7 +106,9 @@ window.CanvasLevelEditor = (() => {
       zoom: 1,
       showGrid: true,
       showRuler: false,
+      showOverlaps: false,
       snap: true,
+      snapToObstacles: true,
       drag: null,
       sync: { enabled: false, updatedAt: null, courses: {} },
       history: [],
@@ -104,13 +118,18 @@ window.CanvasLevelEditor = (() => {
       recentTypes: [],
       userPrefabs: [],
       smartGuideX: null,
+      snapGuideLines: null, // { x1, y1, x2, y2 } for obstacle snap guides
       _gameWin: null,
       hiddenTypes: new Set(),
       sortMode: 'none',
       lockedObs: new Set(),
       gridSize: config.gridSize || GRID,
       _worldResizeHover: false,
-      _worldResizeDrag: null
+      _worldResizeDrag: null,
+      pasteOffset: config.pasteOffset ?? 20,
+      _pasteCount: 0,
+      _lastClipboardKey: null,
+      _savedSnapshot: null
     };
 
     // ---------- Event system ----------
@@ -173,6 +192,9 @@ window.CanvasLevelEditor = (() => {
     let _autosaveTimer = null;
     const markDirty = () => {
       _isDirty = true;
+      // Auto-clear diff overlay on edit
+      const _diffEl = document.getElementById('level-diff-overlay');
+      if (_diffEl) _diffEl.remove();
       clearTimeout(_autosaveTimer);
       _autosaveTimer = setTimeout(() => {
         try {
@@ -273,14 +295,40 @@ window.CanvasLevelEditor = (() => {
     const save = () => {
       if (!safeSetItem(STORAGE_KEY, JSON.stringify(state.levels), 'levels')) return;
       _isDirty = false;
+      state._savedSnapshot = cloneDeep(state.levels);
       publishSync({ announce: false });
       toast(state.sync.enabled ? 'Saved + synced to game' : 'Saved');
       if (config.onSave) { try { config.onSave(cloneDeep(state.levels)); } catch (_) {} }
     };
-    const load = () => {
+    // ---------- Session auto-backup (Feature 5) ----------
+    const sessionBackup = () => {
       try {
         const raw = localStorage.getItem(STORAGE_KEY);
-        if (raw) state.levels = JSON.parse(raw);
+        if (raw) localStorage.setItem(BACKUP_KEY, raw);
+      } catch (_) {}
+    };
+    const restoreBackup = () => {
+      try {
+        const raw = localStorage.getItem(BACKUP_KEY);
+        if (!raw) { toast('No backup found'); return; }
+        if (!confirm('Restore from session backup? Current work will be replaced.')) return;
+        pushHistory(true, 'Restore backup');
+        state.levels = JSON.parse(raw);
+        state.currentIdx = Math.max(0, Math.min(state.currentIdx, state.levels.length - 1));
+        render();
+        toast('Backup restored');
+      } catch (e) { toast('Restore failed: ' + e.message); }
+    };
+
+    const load = () => {
+      // Save existing data as backup BEFORE overwriting
+      sessionBackup();
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) {
+          state.levels = JSON.parse(raw);
+          state._savedSnapshot = cloneDeep(state.levels);
+        }
       } catch (e) { console.warn(e); }
       try {
         const rawSync = localStorage.getItem(SYNC_KEY);
@@ -421,6 +469,7 @@ window.CanvasLevelEditor = (() => {
         data: {
           name: 'New Level',
           subtitle: '',
+          description: '',
           worldW: 800,
           time: 0.3,
           ballStart: { x: 100, y: GY - 30 },
@@ -542,8 +591,10 @@ window.CanvasLevelEditor = (() => {
         ctx.beginPath(); ctx.moveTo(0, GY); ctx.lineTo(W, GY); ctx.stroke();
       }
 
-      // Obstacles — delegate entirely to plugin
-      L.obstacles.forEach((o, i) => {
+      // Obstacles — sort by _z for draw order (ascending = back to front)
+      const obsDrawOrder = L.obstacles.map((o, i) => ({ o, i }))
+        .sort((a, b) => ((a.o._z || 0) - (b.o._z || 0)));
+      obsDrawOrder.forEach(({ o, i }) => {
         if (state.hiddenTypes.has(o.type)) return;
         const inSet = state.selectedKind === 'obs' &&
           (state.selectedObsList.length ? state.selectedObsList.includes(i) : i === state.selectedObs);
@@ -576,6 +627,14 @@ window.CanvasLevelEditor = (() => {
           ctx.restore();
         }
       });
+
+      // Feature 1: Draw dashed group outlines
+      renderGroupOutlines(lvl);
+
+      // Run 3 Feature 1: Overlap preview
+      if (state.showOverlaps) {
+        renderOverlaps(lvl);
+      }
 
       // Feature 2: Draw yellow note indicator dots for obstacles with _note
       L.obstacles.forEach((o, i) => {
@@ -632,6 +691,23 @@ window.CanvasLevelEditor = (() => {
         ctx.moveTo(state.smartGuideX + LEFT_PAD, 0);
         ctx.lineTo(state.smartGuideX + LEFT_PAD, CANVAS_H);
         ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
+      // Feature 3: Snap-to-obstacle guide line
+      if (state.snapGuideLines && state.drag) {
+        ctx.save();
+        ctx.shadowColor = 'transparent';
+        ctx.strokeStyle = '#00bfff';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 3]);
+        state.snapGuideLines.forEach(g => {
+          ctx.beginPath();
+          ctx.moveTo(g.x1, g.y1);
+          ctx.lineTo(g.x2, g.y2);
+          ctx.stroke();
+        });
         ctx.setLineDash([]);
         ctx.restore();
       }
@@ -1160,14 +1236,25 @@ window.CanvasLevelEditor = (() => {
         const bandLabel = band === 'low' ? 'feels thin' : band === 'high' ? 'may overwhelm' : 'playable';
         header = `<li class="v-meta"><span class="v-score v-${band}">Complexity ${score}</span> <span class="muted">(${bandLabel})</span></li>`;
       }
+      // Feature 4: Obstacle summary section
+      let summary = '';
+      if (lvl) {
+        const counts = {};
+        lvl.data.obstacles.forEach(o => { counts[o.type] = (counts[o.type] || 0) + 1; });
+        const entries = Object.entries(counts).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
+        if (entries.length) {
+          const summaryItems = entries.map(([t, n]) => `${t}: ${n}`).join(', ');
+          summary = `<li class="v-meta v-summary"><strong>Obstacles:</strong> ${summaryItems}</li>`;
+        }
+      }
       if (!issues.length) {
-        ul.innerHTML = header + '<li class="empty-state">No issues.</li>';
+        ul.innerHTML = header + '<li class="empty-state">No issues.</li>' + summary;
         return;
       }
       ul.innerHTML = header + issues.map((i, idx) => {
         const clickable = i.obstacleIdx != null;
         return `<li class="v-item v-${i.level}${clickable ? ' v-click' : ''}" data-issue="${idx}"><span class="v-dot"></span>${i.msg}</li>`;
-      }).join('');
+      }).join('') + summary;
       ul.querySelectorAll('.v-click').forEach(el => {
         el.addEventListener('click', () => {
           const issue = issues[parseInt(el.dataset.issue, 10)];
@@ -1275,7 +1362,7 @@ window.CanvasLevelEditor = (() => {
         if (el && el !== document.activeElement) el.value = v ?? '';
       };
       if (!lvl) {
-        ['in-name','in-subtitle','in-worldW','in-time','in-maxShots','in-starShots','in-ballX','in-holeX','in-slot'].forEach(id => set(id, ''));
+        ['in-name','in-subtitle','in-description','in-worldW','in-time','in-maxShots','in-starShots','in-ballX','in-holeX','in-slot'].forEach(id => set(id, ''));
         const ic = $('in-court');
         if (ic && ic !== document.activeElement) ic.value = 'null';
         const cn = $('current-level-name');
@@ -1285,6 +1372,7 @@ window.CanvasLevelEditor = (() => {
       const L = lvl.data;
       set('in-name', L.name);
       set('in-subtitle', L.subtitle);
+      set('in-description', L.description || '');
       set('in-worldW', L.worldW);
       set('in-time', L.time);
       set('in-maxShots', L.maxShots);
@@ -1326,6 +1414,7 @@ window.CanvasLevelEditor = (() => {
         const L = lvl.data;
         L.name = $('in-name').value;
         L.subtitle = $('in-subtitle').value;
+        L.description = $('in-description')?.value || '';
         L.worldW = Math.max(400, Math.min(8000, parseInt($('in-worldW').value) || 800));
         if (L.worldW > 3000) toast('⚠ World width ' + L.worldW + 'px is large — may cause slow rendering', 3000);
         L.time = parseFloat($('in-time').value) || 0;
@@ -1340,7 +1429,7 @@ window.CanvasLevelEditor = (() => {
         slotWarning();
         render();
       };
-      ['in-name','in-subtitle','in-worldW','in-time','in-maxShots','in-starShots','in-ballX','in-holeX','in-court','in-slot']
+      ['in-name','in-subtitle','in-description','in-worldW','in-time','in-maxShots','in-starShots','in-ballX','in-holeX','in-court','in-slot']
         .forEach(id => { const el = $(id); if (el) el.addEventListener('input', upd); });
     };
 
@@ -1505,6 +1594,39 @@ window.CanvasLevelEditor = (() => {
       }
       if (state.selectedObsList.length > 1) {
         if (info) info.textContent = `${state.selectedObsList.length} obstacles selected`;
+
+        // --- Batch Edit: compute common fields (intersection of all selected obstacle schemas) ---
+        const selObs = state.selectedObsList.filter(i => i >= 0 && i < lvl.data.obstacles.length)
+          .map(i => lvl.data.obstacles[i]);
+        const allTypes = [...new Set(selObs.map(o => o.type))];
+        let commonFields = [];
+        if (allTypes.every(t => SCHEMA[t])) {
+          // Start with the first type's fields then intersect
+          commonFields = SCHEMA[allTypes[0]].fields.filter(f =>
+            allTypes.every(t => SCHEMA[t].fields.includes(f))
+          );
+        }
+
+        // Build batch edit HTML
+        let batchHtml = '';
+        if (commonFields.length) {
+          batchHtml += `<div class="form-row" style="margin-top:8px"><strong style="font-size:11px">Batch Edit (common fields)</strong></div>`;
+          const numericFields = config.numericFields || ['x','y','w','h','r','x1','x2','amp','period','strength','force','gap'];
+          commonFields.forEach(f => {
+            // Check if all values are the same
+            const vals = selObs.map(o => o[f]);
+            const allSame = vals.every(v => v === vals[0]);
+            const displayVal = allSame ? (vals[0] ?? '') : '';
+            const placeholder = allSame ? '' : 'mixed';
+            const isNum = typeof vals.find(v => v !== undefined) === 'number' || numericFields.includes(f);
+            if (isNum) {
+              batchHtml += `<div class="form-row"><label>${f}</label><input type="number" step="any" class="batch-field" data-bfield="${f}" value="${displayVal}" placeholder="${placeholder}"></div>`;
+            } else {
+              batchHtml += `<div class="form-row"><label>${f}</label><input type="text" class="batch-field" data-bfield="${f}" value="${displayVal}" placeholder="${placeholder}"></div>`;
+            }
+          });
+        }
+
         if (body) body.innerHTML = `
           <div class="multi-bar">
             <div class="multi-title">${state.selectedObsList.length} selected</div>
@@ -1519,6 +1641,7 @@ window.CanvasLevelEditor = (() => {
             </div>
             <div class="hint">Primary (last-clicked) is the alignment anchor. Shift+click to toggle items.</div>
             <div class="form-row"><label>Change type</label><select id="bulk-type-change"><option value="">— select —</option>${TYPES.map(t => `<option value="${t}">${t}</option>`).join('')}</select></div>
+            ${batchHtml}
           </div>`;
         $('bulk-align-x').addEventListener('click', () => bulkAlign('x'));
         $('bulk-align-y').addEventListener('click', () => bulkAlign('y'));
@@ -1539,6 +1662,20 @@ window.CanvasLevelEditor = (() => {
             render();
           });
         }
+        // Batch field change handlers
+        body.querySelectorAll('.batch-field').forEach(inp => {
+          inp.addEventListener('change', () => {
+            const f = inp.dataset.bfield;
+            const raw = inp.value; if (raw === '') return;
+            const ids = state.selectedObsList.filter(i => i >= 0);
+            pushHistory(true, 'batch edit ' + f);
+            const numVal = parseFloat(raw);
+            const useNum = !isNaN(numVal) && inp.type === 'number';
+            ids.forEach(i => { lvl.data.obstacles[i][f] = useNum ? numVal : raw; });
+            render();
+            toast(`Set ${f} on ${ids.length} obstacles`);
+          });
+        });
         return;
       }
       const o = lvl.data.obstacles[state.selectedObs];
@@ -1546,7 +1683,8 @@ window.CanvasLevelEditor = (() => {
       if (!sch) { if (body) body.innerHTML = '<div class="empty-state">Unknown type: ' + o.type + '</div>'; return; }
       if (info) info.textContent = `${o.type} #${state.selectedObs + 1}`;
       let html = `<div class="props-header"><strong>${o.type}</strong><button class="btn btn-mini btn-danger" id="prop-delete">Delete</button></div>`;
-      html += `<div class="form-row"><label>z-order</label><span>${state.selectedObs + 1} / ${lvl.data.obstacles.length}</span></div>`;
+      html += `<div class="form-row"><label>array pos</label><span>${state.selectedObs + 1} / ${lvl.data.obstacles.length}</span></div>`;
+      html += `<div class="form-row"><label>Z-order</label><input type="number" id="prop-z" step="1" value="${o._z || 0}" title="Draw order (higher = drawn on top)"></div>`;
       html += `<div class="action-row">
         <button class="btn btn-mini" id="act-snap-ground" title="Align to ground">Snap Ground</button>
         <button class="btn btn-mini" id="act-mirror" title="Mirror horizontally">Mirror</button>
@@ -1606,6 +1744,15 @@ window.CanvasLevelEditor = (() => {
           });
         }
         $('prop-delete').addEventListener('click', deleteSelected);
+        const propZEl = $('prop-z');
+        if (propZEl) {
+          propZEl.addEventListener('change', () => {
+            const zv = parseInt(propZEl.value);
+            pushHistory(true, 'Z-order');
+            o._z = isNaN(zv) ? 0 : zv;
+            render();
+          });
+        }
         $('act-snap-ground').addEventListener('click', () => {
           pushHistory(true); snapToGround(o); render(); toast('Snapped to ground');
         });
@@ -1689,6 +1836,150 @@ window.CanvasLevelEditor = (() => {
       state.selectedKind = null;
       render();
       toast(ids.length === 1 ? 'Deleted' : `Deleted ${ids.length}`);
+    };
+
+    // ---------- Feature 1: Obstacle groups ----------
+    const groupSelected = () => {
+      const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+      const ids = state.selectedObsList.filter(i => i >= 0 && i < lvl.data.obstacles.length);
+      if (ids.length < 2) { toast('Select 2+ obstacles to group'); return; }
+      pushHistory(true, 'Group');
+      const groupId = 'group-' + Date.now();
+      ids.forEach(i => { lvl.data.obstacles[i]._group = groupId; });
+      render();
+      toast(`Grouped ${ids.length} obstacles`);
+    };
+    const ungroupSelected = () => {
+      const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+      const ids = state.selectedObsList.filter(i => i >= 0 && i < lvl.data.obstacles.length);
+      if (!ids.length) { toast('Select grouped obstacles to ungroup'); return; }
+      pushHistory(true, 'Ungroup');
+      ids.forEach(i => { delete lvl.data.obstacles[i]._group; });
+      render();
+      toast(`Ungrouped ${ids.length} obstacles`);
+    };
+    // When clicking a grouped obstacle in select mode, expand selection to entire group
+    const expandGroupSelection = (clickedIdx) => {
+      const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+      const o = lvl.data.obstacles[clickedIdx];
+      if (!o || !o._group) return;
+      const groupId = o._group;
+      const groupIds = lvl.data.obstacles.map((ob, i) => ob._group === groupId ? i : -1).filter(i => i >= 0);
+      if (groupIds.length > 1) {
+        state.selectedObsList = groupIds;
+        state.selectedObs = clickedIdx;
+        state.selectedKind = 'obs';
+      }
+    };
+    // Draw dashed bounding boxes around groups
+    const renderGroupOutlines = (lvl) => {
+      if (!lvl) return;
+      const groups = {};
+      lvl.data.obstacles.forEach((o, i) => {
+        if (!o._group || !o._bbox) return;
+        if (!groups[o._group]) groups[o._group] = [];
+        groups[o._group].push(o._bbox);
+      });
+      Object.values(groups).forEach(bboxes => {
+        if (bboxes.length < 2) return;
+        const x1 = Math.min(...bboxes.map(b => b[0])) - 4;
+        const y1 = Math.min(...bboxes.map(b => b[1])) - 4;
+        const x2 = Math.max(...bboxes.map(b => b[0] + b[2])) + 4;
+        const y2 = Math.max(...bboxes.map(b => b[1] + b[3])) + 4;
+        ctx.save();
+        ctx.shadowColor = 'transparent';
+        ctx.strokeStyle = 'rgba(120,200,255,0.6)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 4]);
+        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+        ctx.setLineDash([]);
+        ctx.restore();
+      });
+    };
+
+    // ---------- Run 3 Feature 2: Level diff ----------
+    const showLevelDiff = () => {
+      const lvl = state.levels[state.currentIdx];
+      if (!lvl) { toast('No level open'); return; }
+      if (!state._savedSnapshot) { toast('No saved snapshot — save first'); return; }
+      const savedLvl = state._savedSnapshot[state.currentIdx];
+      if (!savedLvl) { toast('This level has no saved state'); return; }
+      const cur = lvl.data;
+      const sav = savedLvl.data;
+      const curObs = cur.obstacles || [];
+      const savObs = sav.obstacles || [];
+      const added   = curObs.length - savObs.length > 0 ? curObs.length - savObs.length : 0;
+      const removed = savObs.length - curObs.length > 0 ? savObs.length - curObs.length : 0;
+      // Properties changed (top-level scalar fields)
+      const propFields = ['name','subtitle','worldW','time','maxShots','description'];
+      const changedProps = propFields.filter(f => String(cur[f] ?? '') !== String(sav[f] ?? ''));
+      // Also check starShots array equality
+      if (JSON.stringify(cur.starShots) !== JSON.stringify(sav.starShots)) changedProps.push('starShots');
+      if (!added && !removed && !changedProps.length) {
+        // Remove any existing diff overlay
+        const existing = document.getElementById('level-diff-overlay');
+        if (existing) existing.remove();
+        toast('No changes since last save');
+        return;
+      }
+      // Remove old overlay
+      const old = document.getElementById('level-diff-overlay');
+      if (old) old.remove();
+      const div = document.createElement('div');
+      div.id = 'level-diff-overlay';
+      div.style.cssText = `
+        position:fixed;bottom:52px;right:20px;z-index:9999;
+        background:rgba(20,20,30,0.95);color:#fff;
+        padding:12px 16px;border-radius:8px;font-size:13px;line-height:1.6;
+        box-shadow:0 4px 18px rgba(0,0,0,0.55);max-width:300px;
+        border:1px solid rgba(255,255,255,0.12);
+      `;
+      let html = '<strong style="font-size:14px">Level Changes</strong><br>';
+      if (added)   html += `<span style="color:#4ecb71">+ ${added} obstacle${added===1?'':'s'} added</span><br>`;
+      if (removed) html += `<span style="color:#e55">− ${removed} obstacle${removed===1?'':'s'} removed</span><br>`;
+      if (changedProps.length) html += `<span style="color:#f0c060">~ ${changedProps.join(', ')} changed</span><br>`;
+      html += '<button id="diff-close" style="margin-top:8px;padding:2px 10px;cursor:pointer;background:rgba(255,255,255,0.12);border:1px solid rgba(255,255,255,0.2);color:#fff;border-radius:4px;font-size:12px;">Close</button>';
+      div.innerHTML = html;
+      document.body.appendChild(div);
+      document.getElementById('diff-close')?.addEventListener('click', () => div.remove());
+    };
+
+    // ---------- Run 3 Feature 1: Overlap detection ----------
+    const detectOverlaps = (lvl) => {
+      if (!lvl) return { count: 0, pairs: [] };
+      const obs = lvl.data.obstacles;
+      const pairs = [];
+      for (let i = 0; i < obs.length; i++) {
+        const a = obs[i]._bbox; if (!a) continue;
+        for (let j = i + 1; j < obs.length; j++) {
+          const b = obs[j]._bbox; if (!b) continue;
+          // AABB intersection
+          if (a[0] < b[0] + b[2] && a[0] + a[2] > b[0] &&
+              a[1] < b[1] + b[3] && a[1] + a[3] > b[1]) {
+            pairs.push({ i, j,
+              ix: Math.max(a[0], b[0]),
+              iy: Math.max(a[1], b[1]),
+              iw: Math.min(a[0] + a[2], b[0] + b[2]) - Math.max(a[0], b[0]),
+              ih: Math.min(a[1] + a[3], b[1] + b[3]) - Math.max(a[1], b[1]),
+            });
+          }
+        }
+      }
+      return { count: pairs.length, pairs };
+    };
+    const renderOverlaps = (lvl) => {
+      const { count, pairs } = detectOverlaps(lvl);
+      if (!pairs.length) return;
+      ctx.save();
+      ctx.fillStyle = 'rgba(255,30,30,0.32)';
+      ctx.strokeStyle = 'rgba(255,50,50,0.75)';
+      ctx.lineWidth = 1.5;
+      pairs.forEach(({ ix, iy, iw, ih }) => {
+        ctx.fillRect(ix, iy, iw, ih);
+        ctx.strokeRect(ix, iy, iw, ih);
+      });
+      ctx.restore();
+      emit('overlapsDetected', { count, pairs });
     };
 
     // ---------- Play in game ----------
@@ -1821,6 +2112,8 @@ window.CanvasLevelEditor = (() => {
           else state.selectedObsList.push(h.index);
         } else if (!state.selectedObsList.includes(h.index)) {
           state.selectedObsList = [h.index];
+          // Feature 1: expand to whole group if obstacle belongs to one
+          if (state.tool === 'select') expandGroupSelection(h.index);
         }
       } else {
         state.selectedObsList = [];
@@ -1897,8 +2190,79 @@ window.CanvasLevelEditor = (() => {
           newPrimaryX = snapToNeighbor(snap(state.drag.origX + dx));
           deltaX = newPrimaryX - primary.x;
         }
-        const deltaY = snap(state.drag.origY + dy) - state.drag.origY;
+        let deltaY = snap(state.drag.origY + dy) - state.drag.origY;
         const yLocked = config.yLockedTypes || new Set(['hill','movingHill','trampoline','spring','portal']);
+
+        // Feature 3: snap-to-obstacle magnetic snap
+        state.snapGuideLines = null;
+        if (state.snapToObstacles && state.snap) {
+          const SNAP_OBS_PX = 8;
+          const guides = [];
+          // Compute prospective primary edges after deltaX
+          const primaryAfter = { ...primary };
+          if ('x1' in primaryAfter) { primaryAfter.x1 += deltaX; primaryAfter.x2 += deltaX; }
+          else if ('x' in primaryAfter) { primaryAfter.x += deltaX; }
+          if ('y' in primaryAfter) primaryAfter.y += deltaY;
+
+          const neighborObs = lvl.data.obstacles.filter((_, i) => !ids.includes(i));
+          let snapDX = null;
+          let snapDY = null;
+
+          // X edge snap
+          const primLeft  = primaryAfter.x1 != null ? primaryAfter.x1 : (primaryAfter.x ?? 0);
+          const primRight = primaryAfter.x2 != null ? primaryAfter.x2 : (primaryAfter.x ?? 0);
+          const primWidth = primaryAfter.x2 != null ? primaryAfter.x2 - primaryAfter.x1 : (primary.w ?? 0);
+
+          for (const nb of neighborObs) {
+            if (!nb._bbox) continue;
+            // nb edges in world coords (subtract LEFT_PAD)
+            const nbLeft  = nb._bbox[0] - LEFT_PAD;
+            const nbRight = nb._bbox[0] + nb._bbox[2] - LEFT_PAD;
+            const nbTop   = nb._bbox[1];
+            const nbBot   = nb._bbox[1] + nb._bbox[3];
+            const candidates = [
+              { srcEdge: primLeft,  tgtEdge: nbLeft  },
+              { srcEdge: primLeft,  tgtEdge: nbRight },
+              { srcEdge: primRight, tgtEdge: nbLeft  },
+              { srcEdge: primRight, tgtEdge: nbRight },
+            ];
+            for (const c of candidates) {
+              if (Math.abs(c.srcEdge - c.tgtEdge) <= SNAP_OBS_PX) {
+                if (snapDX === null) {
+                  snapDX = c.tgtEdge - c.srcEdge;
+                  // guide: vertical line at snapped edge (canvas x = worldX + LEFT_PAD)
+                  guides.push({ x1: c.tgtEdge + LEFT_PAD, y1: 0, x2: c.tgtEdge + LEFT_PAD, y2: CANVAS_H });
+                }
+                break;
+              }
+            }
+            // Y edge snap
+            if ('y' in primary) {
+              const primTop = primaryAfter.y != null ? primaryAfter.y - (primary.h ?? 0) : 0;
+              const primBot = primaryAfter.y ?? GY;
+              const yCandidates = [
+                { srcEdge: primTop, tgtEdge: nbTop },
+                { srcEdge: primTop, tgtEdge: nbBot },
+                { srcEdge: primBot, tgtEdge: nbTop },
+                { srcEdge: primBot, tgtEdge: nbBot },
+              ];
+              for (const c of yCandidates) {
+                if (Math.abs(c.srcEdge - c.tgtEdge) <= SNAP_OBS_PX) {
+                  if (snapDY === null) {
+                    snapDY = c.tgtEdge - c.srcEdge;
+                    guides.push({ x1: 0, y1: c.tgtEdge, x2: lvl.data.worldW + LEFT_PAD * 2, y2: c.tgtEdge });
+                  }
+                  break;
+                }
+              }
+            }
+            if (snapDX !== null && snapDY !== null) break;
+          }
+          if (snapDX !== null) deltaX += snapDX;
+          if (snapDY !== null) deltaY += snapDY;
+          if (guides.length) state.snapGuideLines = guides;
+        }
+
         ids.forEach(i => {
           const o = lvl.data.obstacles[i];
           if ('x1' in o) { o.x1 += deltaX; o.x2 += deltaX; }
@@ -1917,7 +2281,7 @@ window.CanvasLevelEditor = (() => {
         canvas.style.cursor = '';
         markDirty();
       }
-      if (state.drag) { state.smartGuideX = null; }
+      if (state.drag) { state.smartGuideX = null; state.snapGuideLines = null; }
       state.drag = null;
       if (state.marquee) {
         const m = state.marquee; state.marquee = null;
@@ -1985,6 +2349,7 @@ window.CanvasLevelEditor = (() => {
         const o = lvl.data.obstacles[h.index];
         items.push(
           { label: `Duplicate ${o.type}`, run: () => { copySelection(); pasteClipboard(); } },
+          { label: 'Duplicate in place', run: () => duplicateInPlace() },
           { label: 'Mirror', run: () => { pushHistory(true); mirrorX(o, lvl.data.worldW); render(); } },
           { label: 'Snap to ground', run: () => { pushHistory(true); snapToGround(o); render(); } },
           { label: 'Bring to front', run: () => {
@@ -2001,6 +2366,18 @@ window.CanvasLevelEditor = (() => {
               state.selectedObs = 0;
               render();
             } },
+          { label: 'Bring Forward (_z+1)', run: () => {
+              pushHistory(true, 'Bring Forward');
+              const obs = lvl.data.obstacles[h.index];
+              obs._z = (obs._z || 0) + 1;
+              render();
+            } },
+          { label: 'Send Backward (_z-1)', run: () => {
+              pushHistory(true, 'Send Backward');
+              const obs = lvl.data.obstacles[h.index];
+              obs._z = (obs._z || 0) - 1;
+              render();
+            } },
           { label: state.lockedObs.has(h.index) ? 'Unlock' : 'Lock', run: () => {
               if (state.lockedObs.has(h.index)) { state.lockedObs.delete(h.index); toast('Unlocked'); }
               else { state.lockedObs.add(h.index); toast('Locked'); }
@@ -2013,6 +2390,14 @@ window.CanvasLevelEditor = (() => {
           });
         }
         if (state.selectedObsList.length >= 2) {
+          const lvlObs = lvl.data.obstacles;
+          const selGroups = [...new Set(state.selectedObsList.map(i => lvlObs[i]?._group).filter(Boolean))];
+          const allSameGroup = selGroups.length === 1 && state.selectedObsList.every(i => lvlObs[i]?._group === selGroups[0]);
+          if (allSameGroup) {
+            items.push({ sep: true }, { label: 'Ungroup', run: ungroupSelected });
+          } else {
+            items.push({ sep: true }, { label: 'Group', run: groupSelected });
+          }
           items.push(
             { sep: true },
             { label: 'Align Left',     run: () => alignSelected('left') },
@@ -2099,6 +2484,9 @@ window.CanvasLevelEditor = (() => {
       const items = ids.filter(i => i >= 0).map(i => cloneDeep(lvl.data.obstacles[i]));
       if (!items.length) return;
       clipboard = items;
+      // Feature 5: reset paste counter on new copy
+      const key = JSON.stringify(items.map(o => o.type + (o.x ?? o.x1 ?? 0)));
+      if (key !== state._lastClipboardKey) { state._pasteCount = 0; state._lastClipboardKey = key; }
       toast(items.length === 1 ? 'Copied ' + items[0].type : `Copied ${items.length} obstacles`);
     };
     const pasteAtCenter = () => {
@@ -2132,7 +2520,9 @@ window.CanvasLevelEditor = (() => {
     const pasteClipboard = () => {
       const lvl = state.levels[state.currentIdx]; if (!lvl || !clipboard || !clipboard.length) return;
       pushHistory(true, 'Paste');
-      const off = 40;
+      // Feature 5: incremental paste offset
+      state._pasteCount++;
+      const off = state._pasteCount * state.pasteOffset;
       const newIds = [];
       clipboard.forEach(src => {
         const o = cloneDeep(src);
@@ -2145,7 +2535,8 @@ window.CanvasLevelEditor = (() => {
       state.selectedObs = newIds[newIds.length - 1];
       state.selectedKind = 'obs';
       render();
-      toast(clipboard.length === 1 ? 'Pasted' : `Pasted ${clipboard.length}`);
+      const msg = clipboard.length === 1 ? 'Pasted' : `Pasted ${clipboard.length}`;
+      toast(`${msg} at +${off}px offset`);
     };
 
     const pasteBelow = () => {
@@ -2164,6 +2555,30 @@ window.CanvasLevelEditor = (() => {
       state.selectedKind = 'obs';
       render();
       toast(clipboard.length === 1 ? 'Pasted below' : `Pasted ${clipboard.length} below`);
+    };
+
+    // ---------- Run 3 Feature 3: Duplicate in place ----------
+    const duplicateInPlace = () => {
+      const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+      if (state.selectedKind !== 'obs') { toast('Select obstacles first'); return; }
+      const ids = state.selectedObsList.length ? state.selectedObsList : (state.selectedObs >= 0 ? [state.selectedObs] : []);
+      if (!ids.length) { toast('Select obstacles first'); return; }
+      pushHistory(true, 'duplicate in place');
+      const OFF = 20;
+      const newIds = [];
+      ids.filter(i => i >= 0 && i < lvl.data.obstacles.length).forEach(i => {
+        const o = cloneDeep(lvl.data.obstacles[i]);
+        if ('x1' in o) { o.x1 += OFF; o.x2 += OFF; }
+        else if ('x' in o) o.x += OFF;
+        if ('y' in o) o.y += OFF;
+        lvl.data.obstacles.push(o);
+        newIds.push(lvl.data.obstacles.length - 1);
+      });
+      state.selectedObsList = newIds;
+      state.selectedObs = newIds[newIds.length - 1];
+      state.selectedKind = 'obs';
+      render();
+      toast(`Duplicated ${newIds.length} in place`);
     };
 
     // ---------- Keyboard nudge ----------
@@ -2197,8 +2612,10 @@ window.CanvasLevelEditor = (() => {
       if (!inField && mod && e.shiftKey && (e.key === 'V')) { e.preventDefault(); pasteAtCenter(); return; }
       if (!inField && mod && !e.shiftKey && (e.key === 'v' || e.key === 'V')) { e.preventDefault(); pasteClipboard(); return; }
       if (!inField && mod && (e.key === 'x' || e.key === 'X')) { e.preventDefault(); copySelection(); deleteSelected(); return; }
-      if (!inField && mod && e.shiftKey && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); copySelection(); pasteBelow(); return; }
-      if (!inField && mod && !e.shiftKey && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); copySelection(); pasteClipboard(); return; }
+      if (!inField && mod && e.shiftKey && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); showLevelDiff(); return; }
+      if (!inField && mod && !e.shiftKey && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); duplicateInPlace(); return; }
+      if (!inField && mod && !e.shiftKey && (e.key === 'g' || e.key === 'G')) { e.preventDefault(); groupSelected(); return; }
+      if (!inField && mod && e.shiftKey && (e.key === 'g' || e.key === 'G')) { e.preventDefault(); ungroupSelected(); return; }
       if (!inField && (e.key === '?' || (e.shiftKey && e.key === '/'))) {
         e.preventDefault();
         const h = $('help-overlay'); if (h) { h.style.display = ''; $('help-close')?.focus(); }
@@ -2234,7 +2651,7 @@ window.CanvasLevelEditor = (() => {
       }
       if (mod && (e.key === '=' || e.key === '+')) { e.preventDefault(); $('btn-zoom-in')?.click(); return; }
       if (mod && e.key === '-') { e.preventDefault(); $('btn-zoom-out')?.click(); return; }
-      if (mod && e.key === '0') { e.preventDefault(); fitCanvas(); render(); return; }
+      if (mod && e.key === '0') { e.preventDefault(); state.zoom = 1; resizeCanvas(); render(); saveSettings(); toast('Zoom 100%'); return; }
       if (!inField && mod && e.key === 'Home') { e.preventDefault(); selectLevel(0); return; }
       if (!inField && mod && e.key === 'End') { e.preventDefault(); selectLevel(state.levels.length - 1); return; }
       if (!inField && mod && (e.key === 'n' || e.key === 'N')) { e.preventDefault(); $('btn-new-level')?.click(); return; }
@@ -2403,6 +2820,18 @@ window.CanvasLevelEditor = (() => {
       URL.revokeObjectURL(url);
     });
     $('btn-import').addEventListener('click', () => $('file-import').click());
+    // Feature 5: Restore backup button — inject programmatically near btn-import
+    (() => {
+      const importBtn = $('btn-import');
+      if (!importBtn) return;
+      const btn = document.createElement('button');
+      btn.id = 'btn-restore-backup';
+      btn.className = 'btn';
+      btn.title = 'Restore session backup (data from before last page load)';
+      btn.textContent = 'Restore Backup';
+      btn.addEventListener('click', restoreBackup);
+      importBtn.parentElement.insertBefore(btn, importBtn.nextSibling);
+    })();
     $('btn-import-merge')?.addEventListener('click', () => $('file-import-merge')?.click());
     const _importLevels = (arr, mergeMode = false) => {
       if (!Array.isArray(arr)) throw new Error('not an array');
@@ -2520,6 +2949,9 @@ window.CanvasLevelEditor = (() => {
     $('opt-grid').addEventListener('change', (e) => { state.showGrid = e.target.checked; saveSettings(); render(); });
     $('opt-ruler')?.addEventListener('change', (e) => { state.showRuler = e.target.checked; saveSettings(); render(); });
     $('opt-snap').addEventListener('change', (e) => { state.snap = e.target.checked; saveSettings(); });
+    $('opt-snap-obstacles')?.addEventListener('change', (e) => { state.snapToObstacles = e.target.checked; saveSettings(); });
+    $('opt-overlaps')?.addEventListener('change', (e) => { state.showOverlaps = e.target.checked; render(); });
+    $('btn-show-diff')?.addEventListener('click', () => showLevelDiff());
     $('btn-zoom-in').addEventListener('click', () => { state.zoom = Math.min(2, state.zoom * 1.2); resizeCanvas(); render(); saveSettings(); });
     $('btn-zoom-out').addEventListener('click', () => { state.zoom = Math.max(0.2, state.zoom / 1.2); resizeCanvas(); render(); saveSettings(); });
     $('btn-zoom-fit').addEventListener('click', () => { fitCanvas(); render(); saveSettings(); });
@@ -2536,10 +2968,16 @@ window.CanvasLevelEditor = (() => {
       });
     });
 
-    // ---------- Zoom label click: reset to 100% ----------
-    $('zoom-label')?.addEventListener('click', () => {
-      state.zoom = 1; resizeCanvas(); render(); saveSettings();
-      toast('Zoom reset to 100%');
+    // ---------- Feature 2: Zoom label click: show zoom preset menu ----------
+    $('zoom-label')?.addEventListener('click', (e) => {
+      const presets = [50, 75, 100, 150, 200];
+      const items = presets.map(pct => ({
+        label: (Math.round(state.zoom * 100) === pct ? '✓ ' : '  ') + pct + '%',
+        run: () => { state.zoom = pct / 100; resizeCanvas(); render(); saveSettings(); toast('Zoom ' + pct + '%'); }
+      }));
+      items.push({ sep: true });
+      items.push({ label: 'Fit to window', run: () => { fitCanvas(); render(); saveSettings(); toast('Fit to window'); } });
+      showContextMenu(e.clientX, e.clientY, items);
     });
 
     // ---------- Delete-all-unassigned button ----------
@@ -2952,6 +3390,7 @@ window.CanvasLevelEditor = (() => {
           showGrid: state.showGrid,
           showRuler: state.showRuler,
           snap: state.snap,
+          snapToObstacles: state.snapToObstacles,
           zoom: state.zoom,
           filter: $('filter-court')?.value || 'all',
           recentTypes: state.recentTypes,
@@ -2968,6 +3407,11 @@ window.CanvasLevelEditor = (() => {
         if (typeof s.showGrid === 'boolean') state.showGrid = s.showGrid;
         if (typeof s.showRuler === 'boolean') state.showRuler = s.showRuler;
         if (typeof s.snap === 'boolean') state.snap = s.snap;
+        if (typeof s.snapToObstacles === 'boolean') {
+          state.snapToObstacles = s.snapToObstacles;
+          const soEl = $('opt-snap-obstacles');
+          if (soEl) soEl.checked = state.snapToObstacles;
+        }
         if (typeof s.zoom === 'number') state.zoom = s.zoom;
         if (Array.isArray(s.recentTypes)) state.recentTypes = s.recentTypes.filter(t => SCHEMA[t]);
         if (typeof s.currentIdx === 'number' && s.currentIdx >= 0) state.currentIdx = s.currentIdx;
@@ -2997,11 +3441,40 @@ window.CanvasLevelEditor = (() => {
     renderPalette();
     wireConfig();
 
+    // ---------- Feature 2 (Run 2): Find & Replace obstacle positions ----------
+    const wireFindReplace = () => {
+      const applyBtn = $('fr-apply');
+      if (!applyBtn) return;
+      applyBtn.addEventListener('click', () => {
+        const lvl = state.levels[state.currentIdx]; if (!lvl) { toast('No level open'); return; }
+        const typeVal = $('fr-type')?.value || '';
+        const shiftX  = parseFloat($('fr-shift-x')?.value) || 0;
+        const shiftY  = parseFloat($('fr-shift-y')?.value) || 0;
+        const scaleX  = parseFloat($('fr-scale-x')?.value) || 1;
+        if (!typeVal) { toast('Select an obstacle type'); return; }
+        const targets = lvl.data.obstacles.filter(o => o.type === typeVal);
+        if (!targets.length) { toast(`No obstacles of type "${typeVal}"`, 2000); return; }
+        pushHistory(true, 'shift ' + typeVal);
+        targets.forEach(o => {
+          if ('x1' in o) {
+            o.x1 = Math.round(o.x1 * scaleX + shiftX);
+            o.x2 = Math.round(o.x2 * scaleX + shiftX);
+          } else if ('x' in o) {
+            o.x = Math.round(o.x * scaleX + shiftX);
+          }
+          if ('y' in o) o.y = Math.round(o.y + shiftY);
+        });
+        render();
+        toast(`Shifted ${targets.length} "${typeVal}" obstacle${targets.length === 1 ? '' : 's'}`);
+      });
+    };
+    wireFindReplace();
+
     // Populate help shortcut list
     const SHORTCUTS = [
       ['Ctrl+Z', 'Undo'], ['Ctrl+Y', 'Redo'], ['Ctrl+C', 'Copy'],
       ['Ctrl+V', 'Paste'], ['Ctrl+Shift+V', 'Paste at center'],
-      ['Ctrl+X', 'Cut'], ['Ctrl+D', 'Duplicate'], ['Ctrl+Shift+D', 'Duplicate below'],
+      ['Ctrl+X', 'Cut'], ['Ctrl+D', 'Duplicate in place'], ['Ctrl+Shift+D', 'Show level diff'],
       ['Ctrl+A', 'Select all obstacles'], ['Escape', 'Deselect all'],
       ['Ctrl+N', 'New level'], ['Ctrl+S', 'Save'],
       ['Delete/Backspace', 'Delete selected'],
@@ -3014,7 +3487,8 @@ window.CanvasLevelEditor = (() => {
       ['G', 'Toggle grid'], ['R', 'Toggle ruler'],
       ['H', 'Toggle hide selected type'], ['L', 'Lock/unlock selected'],
       ['[/]', 'Grid size -/+5'],
-      ['Ctrl+=/-', 'Zoom in/out'], ['Ctrl+0', 'Fit to window'],
+      ['Ctrl+G', 'Group selected'], ['Ctrl+Shift+G', 'Ungroup selected'],
+      ['Ctrl+=/-', 'Zoom in/out'], ['Ctrl+0', 'Reset zoom to 100%'],
       ['F', 'Fit zoom to canvas'],
       ['Ctrl+Home/End', 'First/last level'],
       ['P', 'Play level'],
@@ -3022,10 +3496,45 @@ window.CanvasLevelEditor = (() => {
       ['Home', 'Scroll to ball'], ['End', 'Scroll to hole'],
     ];
     const helpEl = $('help-shortcuts');
+    const helpBox = $('help-box');
     if (helpEl) {
       helpEl.innerHTML = SHORTCUTS.map(([k, v]) =>
         `<li><kbd>${k}</kbd> <span>${v}</span></li>`
       ).join('');
+    }
+    // Feature 5: Search + copy shortcuts in help overlay
+    if (helpBox && helpEl) {
+      // Search input
+      const searchWrap = document.createElement('div');
+      searchWrap.style.cssText = 'margin:6px 0 8px;display:flex;gap:6px;align-items:center;';
+      const searchInp = document.createElement('input');
+      searchInp.type = 'search';
+      searchInp.placeholder = 'Search shortcuts…';
+      searchInp.id = 'help-search';
+      searchInp.style.cssText = 'flex:1;padding:4px 8px;font-size:12px;border-radius:4px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.1);color:inherit;';
+      searchInp.addEventListener('input', () => {
+        const q = searchInp.value.toLowerCase();
+        helpEl.querySelectorAll('li').forEach(li => {
+          li.style.display = (!q || li.textContent.toLowerCase().includes(q)) ? '' : 'none';
+        });
+      });
+      // Copy all button
+      const copyBtn = document.createElement('button');
+      copyBtn.textContent = 'Copy all';
+      copyBtn.className = 'btn btn-mini';
+      copyBtn.style.cssText = 'font-size:11px;';
+      copyBtn.addEventListener('click', () => {
+        const text = SHORTCUTS.map(([k, v]) => `${k}: ${v}`).join('\n');
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(text).then(() => toast('Shortcuts copied!'));
+        } else {
+          prompt('Copy shortcuts:', text);
+        }
+      });
+      searchWrap.appendChild(searchInp);
+      searchWrap.appendChild(copyBtn);
+      // Insert before the list
+      helpBox.insertBefore(searchWrap, helpEl);
     }
 
     // URL params: ?level=<base64-json> headless mode, ?zen=1
@@ -3153,7 +3662,36 @@ window.CanvasLevelEditor = (() => {
       alignTop()     { alignSelected('top'); },
       alignBottom()  { alignSelected('bottom'); },
       alignCenterH() { alignSelected('centerH'); },
-      alignCenterV() { alignSelected('centerV'); }
+      alignCenterV() { alignSelected('centerV'); },
+      groupSelected,
+      ungroupSelected,
+      setSnapToObstacles(v) { state.snapToObstacles = !!v; },
+      // Z-order public API
+      bringForward(idx) {
+        const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+        const o = lvl.data.obstacles[idx]; if (!o) return;
+        pushHistory(true, 'Bring Forward'); o._z = (o._z || 0) + 1; render();
+      },
+      sendBackward(idx) {
+        const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+        const o = lvl.data.obstacles[idx]; if (!o) return;
+        pushHistory(true, 'Send Backward'); o._z = (o._z || 0) - 1; render();
+      },
+      bringToFront(idx) {
+        const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+        const o = lvl.data.obstacles[idx]; if (!o) return;
+        pushHistory(true, 'Bring To Front');
+        const maxZ = Math.max(0, ...lvl.data.obstacles.map(x => x._z || 0));
+        o._z = maxZ + 1; render();
+      },
+      sendToBack(idx) {
+        const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+        const o = lvl.data.obstacles[idx]; if (!o) return;
+        pushHistory(true, 'Send To Back');
+        const minZ = Math.min(0, ...lvl.data.obstacles.map(x => x._z || 0));
+        o._z = minZ - 1; render();
+      },
+      restoreBackup
     };
   }; // end create()
 
