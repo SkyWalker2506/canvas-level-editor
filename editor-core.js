@@ -71,7 +71,10 @@ window.CanvasLevelEditor = (() => {
     const HISTORY_MAX = 50;
     const PUBLISH_HISTORY_MAX = 20;
     const LEFT_PAD = 25;
-    const GRID = 20;
+    const GRID = 20; // default grid size (5–100 valid range)
+
+    // ---------- Dirty flag ----------
+    let _isDirty = false;
 
     // ---------- DOM refs ----------
     const $ = (id) => document.getElementById(id);
@@ -102,7 +105,9 @@ window.CanvasLevelEditor = (() => {
       smartGuideX: null,
       _gameWin: null,
       hiddenTypes: new Set(),
-      sortMode: 'none'
+      sortMode: 'none',
+      lockedObs: new Set(),
+      gridSize: config.gridSize || GRID
     };
 
     // ---------- Event system ----------
@@ -120,7 +125,15 @@ window.CanvasLevelEditor = (() => {
       toast._t = setTimeout(() => t.classList.remove('show'), ms);
     };
     const cloneDeep = (o) => JSON.parse(JSON.stringify(o));
-    const snap = (v) => state.snap ? Math.round(v / GRID) * GRID : Math.round(v);
+    const snap = (v) => state.snap ? Math.round(v / state.gridSize) * state.gridSize : Math.round(v);
+
+    // ---------- rAF-batched render ----------
+    let _rafPending = false;
+    const scheduleRender = () => {
+      if (_rafPending) return;
+      _rafPending = true;
+      requestAnimationFrame(() => { _rafPending = false; render(); });
+    };
 
     // ---------- Storage ----------
     const isQuotaError = (e) => {
@@ -146,6 +159,7 @@ window.CanvasLevelEditor = (() => {
     // ---------- Auto-save ----------
     let _autosaveTimer = null;
     const markDirty = () => {
+      _isDirty = true;
       clearTimeout(_autosaveTimer);
       _autosaveTimer = setTimeout(() => {
         try {
@@ -169,6 +183,7 @@ window.CanvasLevelEditor = (() => {
             }
           }
         } catch (_) {}
+        _isDirty = false;
         if (config.onChange) {
           try { config.onChange(cloneDeep(state.levels[state.currentIdx])); } catch (_) {}
         }
@@ -230,6 +245,7 @@ window.CanvasLevelEditor = (() => {
     // ---------- Storage: load/save ----------
     const save = () => {
       if (!safeSetItem(STORAGE_KEY, JSON.stringify(state.levels), 'levels')) return;
+      _isDirty = false;
       publishSync({ announce: false });
       toast(state.sync.enabled ? 'Saved + synced to game' : 'Saved');
       if (config.onSave) { try { config.onSave(cloneDeep(state.levels)); } catch (_) {} }
@@ -267,6 +283,10 @@ window.CanvasLevelEditor = (() => {
       }
       const name = prompt('Prefab name:', '');
       if (!name) return;
+      if (state.userPrefabs.some(p => p.name === name)) {
+        toast('A prefab named "' + name + '" already exists. Use a different name.');
+        return;
+      }
       const src = state.selectedObsList.map(i => cloneDeep(lvl.data.obstacles[i]));
       const minX = Math.min(...src.map(o => o.x ?? o.x1 ?? 0));
       src.forEach(o => {
@@ -500,6 +520,18 @@ window.CanvasLevelEditor = (() => {
             ctx.fillStyle = '#ff0000';
             ctx.fillRect(ex - 10, ey - 10, 20, 20);
           }
+          // Draw lock indicator for locked obstacles
+          if (state.lockedObs.has(i)) {
+            const lx = (o.x ?? o.x1 ?? 0) + LEFT_PAD;
+            const ly = o.y ?? GY - 20;
+            ctx.save();
+            ctx.globalAlpha = 0.6;
+            ctx.fillStyle = '#333';
+            ctx.fillRect(lx - 6, ly - 8, 12, 10);
+            ctx.fillRect(lx - 4, ly - 13, 8, 6);
+            ctx.globalAlpha = 1;
+            ctx.restore();
+          }
           ctx.restore();
         }
       });
@@ -603,6 +635,7 @@ window.CanvasLevelEditor = (() => {
       const hx = L.hole.x + LEFT_PAD;
       if (x > hx - 20 && x < hx + 20 && y > L.hole.y - 42 && y < L.hole.y + 8) return { kind: 'hole' };
       for (let i = L.obstacles.length - 1; i >= 0; i--) {
+        if (state.lockedObs.has(i)) continue;
         const b = L.obstacles[i]._bbox;
         if (!b) continue;
         if (x >= b[0] && x <= b[0] + b[2] && y >= b[1] && y <= b[1] + b[3]) return { kind: 'obs', index: i };
@@ -823,7 +856,11 @@ window.CanvasLevelEditor = (() => {
       }
       entries.forEach(({ lvl, idx }) => {
         const li = document.createElement('li');
-        li.className = 'level-item' + (idx === state.currentIdx ? ' active' : '');
+        const isActive = idx === state.currentIdx;
+        li.className = 'level-item' + (isActive ? ' active' : '');
+        if (isActive) {
+          setTimeout(() => li.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), 50);
+        }
         const chipCls = lvl.courtId ? 'court-chip c' + lvl.courtId : 'court-chip unassigned';
         const courtTag = lvl.courtId ? `C${lvl.courtId}${lvl.slot ? '·' + lvl.slot : ''}` : '—';
         const name = lvl.data.name || '(unnamed)';
@@ -837,6 +874,30 @@ window.CanvasLevelEditor = (() => {
           if (e.target.classList.contains('play-btn')) return;
           selectLevel(idx);
         });
+        // Inline name edit on double-click
+        const nameSpan = li.querySelector('.name');
+        if (nameSpan) {
+          nameSpan.addEventListener('dblclick', (e) => {
+            e.stopPropagation();
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.value = lvl.data.name || '';
+            input.className = 'name-edit-input';
+            nameSpan.replaceWith(input);
+            input.focus(); input.select();
+            const commit = () => {
+              pushHistory(true, 'Rename');
+              lvl.data.name = input.value;
+              render();
+            };
+            const cancel = () => { render(); };
+            input.addEventListener('blur', commit);
+            input.addEventListener('keydown', (ev) => {
+              if (ev.key === 'Enter') { ev.preventDefault(); input.removeEventListener('blur', commit); commit(); }
+              if (ev.key === 'Escape') { ev.preventDefault(); input.removeEventListener('blur', commit); cancel(); }
+            });
+          });
+        }
         const pb = li.querySelector('.play-btn');
         if (pb) pb.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -982,9 +1043,18 @@ window.CanvasLevelEditor = (() => {
           recentWrap.style.display = 'none';
         }
       }
+      const currentObstacles = state.levels[state.currentIdx]?.data?.obstacles || [];
       list.forEach(type => {
         if (!SCHEMA[type]) return;
-        grid.appendChild(makeAssetButton(type));
+        const btn = makeAssetButton(type);
+        const count = currentObstacles.filter(o => o.type === type).length;
+        if (count > 0) {
+          const badge = document.createElement('span');
+          badge.className = 'asset-count';
+          badge.textContent = count;
+          btn.appendChild(badge);
+        }
+        grid.appendChild(btn);
       });
     };
 
@@ -1047,7 +1117,7 @@ window.CanvasLevelEditor = (() => {
         const L = lvl.data;
         L.name = $('in-name').value;
         L.subtitle = $('in-subtitle').value;
-        L.worldW = parseInt($('in-worldW').value) || 800;
+        L.worldW = Math.max(400, Math.min(8000, parseInt($('in-worldW').value) || 800));
         L.time = parseFloat($('in-time').value) || 0;
         L.maxShots = parseInt($('in-maxShots').value) || 4;
         L.starShots = $('in-starShots').value.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
@@ -1294,6 +1364,9 @@ window.CanvasLevelEditor = (() => {
         }
       }
       lvl.data.obstacles.push(o);
+      if (lvl.data.obstacles.length > 50) {
+        toast('⚠ Level has ' + lvl.data.obstacles.length + ' obstacles — may impact performance', 4000);
+      }
       state.selectedObs = lvl.data.obstacles.length - 1;
       state.selectedObsList = [state.selectedObs];
       state.selectedKind = 'obs';
@@ -1432,12 +1505,20 @@ window.CanvasLevelEditor = (() => {
     canvas.addEventListener('mousemove', (e) => {
       const p = canvasPt(e);
       const cp = $('cursor-pos');
-      if (cp) cp.textContent = `x: ${Math.round(p.x - LEFT_PAD)}, y: ${Math.round(p.y)}`;
-      if (state.marquee) { state.marquee.endX = p.x; state.marquee.endY = p.y; render(); return; }
+      if (cp) {
+        const snapIndicator = state.snap ? ' [snap]' : '';
+        cp.textContent = `x: ${Math.round(p.x - LEFT_PAD)}  y: ${Math.round(p.y)}${snapIndicator}`;
+      }
+      if (state.marquee) { state.marquee.endX = p.x; state.marquee.endY = p.y; scheduleRender(); return; }
       if (!state.drag) return;
       const lvl = state.levels[state.currentIdx]; if (!lvl) return;
-      const dx = p.x - state.drag.startX;
-      const dy = p.y - state.drag.startY;
+      let dx = p.x - state.drag.startX;
+      let dy = p.y - state.drag.startY;
+      // Shift+drag: axis lock
+      if (e.shiftKey && state.drag.kind === 'obs') {
+        if (Math.abs(dx) > Math.abs(dy)) dy = 0;
+        else dx = 0;
+      }
       if (state.drag.kind === 'ball') {
         lvl.data.ballStart.x = snap(state.drag.origX + dx);
         lvl.data.ballStart.y = snap(state.drag.origY + dy);
@@ -1486,7 +1567,7 @@ window.CanvasLevelEditor = (() => {
           }
         });
       }
-      render();
+      scheduleRender();
     });
 
     window.addEventListener('mouseup', () => {
@@ -1572,6 +1653,11 @@ window.CanvasLevelEditor = (() => {
               const [item] = lvl.data.obstacles.splice(h.index, 1);
               lvl.data.obstacles.unshift(item);
               state.selectedObs = 0;
+              render();
+            } },
+          { label: state.lockedObs.has(h.index) ? 'Unlock' : 'Lock', run: () => {
+              if (state.lockedObs.has(h.index)) { state.lockedObs.delete(h.index); toast('Unlocked'); }
+              else { state.lockedObs.add(h.index); toast('Locked'); }
               render();
             } },
           { sep: true },
@@ -1713,6 +1799,7 @@ window.CanvasLevelEditor = (() => {
           render();
         }
       }
+      if (!inField && mod && (e.key === 'n' || e.key === 'N')) { e.preventDefault(); $('btn-new-level')?.click(); return; }
       if (!inField && mod && (e.key === 'a' || e.key === 'A')) {
         e.preventDefault();
         const lvl = state.levels[state.currentIdx];
@@ -1817,6 +1904,17 @@ window.CanvasLevelEditor = (() => {
         } catch (_) { return false; }
       });
       const skipped = arr.length - valid.length;
+      // Clamp obstacle coordinates to reasonable bounds
+      valid.forEach(item => {
+        const worldW = item.data.worldW || 800;
+        (item.data.obstacles || []).forEach(o => {
+          const clampX = (v) => Math.max(-100, Math.min(worldW + 100, v));
+          const clampY = (v) => Math.max(-100, Math.min(CANVAS_H + 100, v));
+          if ('x' in o) o.x = clampX(o.x);
+          if ('x1' in o) { o.x1 = clampX(o.x1); o.x2 = clampX(o.x2); }
+          if ('y' in o) o.y = clampY(o.y);
+        });
+      });
       pushHistory(true, 'Import');
       state.levels = valid;
       state.currentIdx = 0;
@@ -1907,6 +2005,51 @@ window.CanvasLevelEditor = (() => {
         if (b.hasAttribute('aria-pressed')) b.setAttribute('aria-pressed', 'true');
         canvas.style.cursor = state.tool === 'eraser' ? 'crosshair' : (state.tool === 'select' ? '' : 'cell');
       });
+    });
+
+    // ---------- Zoom label click: reset to 100% ----------
+    $('zoom-label')?.addEventListener('click', () => {
+      state.zoom = 1; resizeCanvas(); render(); saveSettings();
+      toast('Zoom reset to 100%');
+    });
+
+    // ---------- Delete-all-unassigned button ----------
+    $('btn-delete-all-unassigned')?.addEventListener('click', () => {
+      const unassigned = state.levels.filter(l => l.courtId == null || l.slot == null);
+      const n = unassigned.length;
+      if (!n) { toast('No unassigned levels'); return; }
+      if (!confirm(`Delete ${n} unassigned level${n === 1 ? '' : 's'}?`)) return;
+      pushHistory(true, 'Delete unassigned');
+      state.levels = state.levels.filter(l => l.courtId != null && l.slot != null);
+      state.currentIdx = Math.max(0, Math.min(state.currentIdx, state.levels.length - 1));
+      render();
+      toast(`Deleted ${n} level${n === 1 ? '' : 's'}`);
+    });
+
+    // ---------- Share level as URL ----------
+    $('btn-share-level')?.addEventListener('click', () => {
+      const lvl = state.levels[state.currentIdx]; if (!lvl) { toast('No level selected'); return; }
+      try {
+        const encoded = btoa(unescape(encodeURIComponent(JSON.stringify(lvl))));
+        const url = location.origin + location.pathname + '?level=' + encoded;
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(url).then(() => toast('Level URL copied to clipboard!'));
+        } else {
+          prompt('Copy this URL:', url);
+        }
+      } catch (e) { toast('Share failed: ' + e.message); }
+    });
+
+    // ---------- Configurable grid size ----------
+    $('btn-grid-size')?.addEventListener('click', () => {
+      const cur = state.gridSize;
+      const val = prompt('Grid size (5–100):', String(cur));
+      if (val == null) return;
+      const n = parseInt(val, 10);
+      if (isNaN(n) || n < 5 || n > 100) { toast('Invalid grid size — enter 5 to 100'); return; }
+      state.gridSize = n;
+      saveSettings();
+      toast('Grid size set to ' + n);
     });
 
     // ---------- Navigation: pan, jump, minimap ----------
@@ -2078,7 +2221,15 @@ window.CanvasLevelEditor = (() => {
         else {
           const name = lvl.data.name || '(unnamed)';
           const slotLbl = lvl.courtId && lvl.slot ? ` C${lvl.courtId} S${lvl.slot}` : '';
-          nameEl.textContent = `Editing: ${name}${slotLbl}`;
+          let obsLbl = '';
+          if (state.selectedKind === 'obs') {
+            if (state.selectedObsList.length > 1) {
+              obsLbl = ` | ${state.selectedObsList.length} selected`;
+            } else if (state.selectedObs >= 0) {
+              obsLbl = ` | obs #${state.selectedObs + 1}/${lvl.data.obstacles.length}`;
+            }
+          }
+          nameEl.textContent = `Editing: ${name}${slotLbl}${obsLbl}`;
         }
       }
       let issues = [];
@@ -2250,7 +2401,8 @@ window.CanvasLevelEditor = (() => {
           zoom: state.zoom,
           filter: $('filter-court')?.value || 'all',
           recentTypes: state.recentTypes,
-          currentIdx: state.currentIdx
+          currentIdx: state.currentIdx,
+          gridSize: state.gridSize
         }));
       } catch (_) {}
     };
@@ -2265,6 +2417,7 @@ window.CanvasLevelEditor = (() => {
         if (typeof s.zoom === 'number') state.zoom = s.zoom;
         if (Array.isArray(s.recentTypes)) state.recentTypes = s.recentTypes.filter(t => SCHEMA[t]);
         if (typeof s.currentIdx === 'number' && s.currentIdx >= 0) state.currentIdx = s.currentIdx;
+        if (typeof s.gridSize === 'number' && s.gridSize >= 5 && s.gridSize <= 100) state.gridSize = s.gridSize;
         if ($('opt-grid')) $('opt-grid').checked = state.showGrid;
         if ($('opt-snap')) $('opt-snap').checked = state.snap;
         if ($('opt-ruler')) $('opt-ruler').checked = state.showRuler;
@@ -2331,6 +2484,11 @@ window.CanvasLevelEditor = (() => {
       }
     } catch (_) {}
 
+    // ---------- Beforeunload dirty guard ----------
+    window.addEventListener('beforeunload', (e) => {
+      if (_isDirty) { e.preventDefault(); e.returnValue = ''; }
+    });
+
     window.addEventListener('resize', () => { fitCanvas(); render(); });
     fitCanvas();
     render();
@@ -2378,6 +2536,17 @@ window.CanvasLevelEditor = (() => {
       toggleTypeVisibility(type) {
         if (state.hiddenTypes.has(type)) state.hiddenTypes.delete(type);
         else state.hiddenTypes.add(type);
+        render();
+      },
+      lockObstacle(idx) { state.lockedObs.add(idx); render(); },
+      unlockObstacle(idx) { state.lockedObs.delete(idx); render(); },
+      getLockedObstacles() { return Array.from(state.lockedObs); },
+      snapshot() { return cloneDeep({ levels: state.levels, currentIdx: state.currentIdx }); },
+      restore(snap) {
+        if (!snap || !Array.isArray(snap.levels)) return;
+        pushHistory(true, 'Restore snapshot');
+        state.levels = cloneDeep(snap.levels);
+        state.currentIdx = Math.max(0, Math.min(snap.currentIdx || 0, state.levels.length - 1));
         render();
       }
     };
