@@ -64,6 +64,7 @@ window.CanvasLevelEditor = (() => {
     const COURSES            = config.courses           || {};
     const TYPE_COLORS        = config.typeColors        || {};
     const ASSET_TOOLTIPS     = config.assetTooltips     || {};
+    const TYPE_ICONS         = config.typeIcons         || {};
     const COURSE_NAMES       = config.courseNames       || {};
     const BUILTIN_PREFABS    = config.builtinPrefabs    || [];
 
@@ -1047,7 +1048,10 @@ window.CanvasLevelEditor = (() => {
       b.className = 'asset-btn' + (extraCls ? ' ' + extraCls : '');
       b.dataset.type = type;
       b.title = ASSET_TOOLTIPS[type] || type;
-      b.innerHTML = `<span class="asset-swatch" style="background:${TYPE_COLORS[type] || '#888'}"></span><span>${type}</span>`;
+      const icon = TYPE_ICONS[type];
+      b.innerHTML = icon
+        ? `<span class="asset-icon">${icon}</span><span>${type}</span>`
+        : `<span class="asset-swatch" style="background:${TYPE_COLORS[type] || '#888'}"></span><span>${type}</span>`;
       b.addEventListener('click', () => {
         state.tool = type;
         document.querySelectorAll('.asset-btn, .tool-btn').forEach(el => el.classList.remove('active'));

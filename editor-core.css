@@ -330,6 +330,16 @@ body.is-zen #workspace { grid-template-columns: 1fr !important; }
   flex-shrink: 0;
 }
 
+.asset-icon {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  font-size: 16px;
+  line-height: 20px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
 .tool-row {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
