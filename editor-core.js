@@ -39,7 +39,18 @@ window.CanvasLevelEditor = (() => {
   // Course UI:
   //   courseNames                    — shown in sync panel chips
 
+  // ---------- Config validation ----------
+  const validateConfig = (config) => {
+    if (!config.schema || Object.keys(config.schema).length === 0)
+      console.warn('[CanvasLevelEditor] config.schema is missing or empty — no obstacle types will be available');
+    if (!config.courses)
+      console.warn('[CanvasLevelEditor] config.courses is missing — course features will not work');
+    if (!config.drawObstacle)
+      console.warn('[CanvasLevelEditor] config.drawObstacle is missing — obstacles will not render');
+  };
+
   const create = (config) => {
+    validateConfig(config);
 
     // ---------- Config with defaults ----------
     const STORAGE_KEY        = config.storageKey        || 'canvas_editor_v1';
@@ -89,7 +100,15 @@ window.CanvasLevelEditor = (() => {
       recentTypes: [],
       userPrefabs: [],
       smartGuideX: null,
-      _gameWin: null
+      _gameWin: null,
+      hiddenTypes: new Set(),
+      sortMode: 'none'
+    };
+
+    // ---------- Event system ----------
+    const _listeners = {};
+    const emit = (event, data) => {
+      (_listeners[event] || []).forEach(cb => { try { cb(data); } catch (e) { console.error(e); } });
     };
 
     // ---------- Utilities ----------
@@ -150,6 +169,9 @@ window.CanvasLevelEditor = (() => {
             }
           }
         } catch (_) {}
+        if (config.onChange) {
+          try { config.onChange(cloneDeep(state.levels[state.currentIdx])); } catch (_) {}
+        }
       }, 800);
     };
 
@@ -171,12 +193,14 @@ window.CanvasLevelEditor = (() => {
       state.suppressHistory = false;
     };
     let _lastHistoryTs = 0;
-    const pushHistory = (force = false) => {
+    const pushHistory = (force = false, label = '') => {
       if (state.suppressHistory) return;
       const now = Date.now();
       if (!force && now - _lastHistoryTs < 150) return;
       _lastHistoryTs = now;
-      state.history.push(takeSnapshot());
+      const snap = takeSnapshot();
+      snap.label = label;
+      state.history.push(snap);
       if (state.history.length > HISTORY_MAX) state.history.shift();
       state.future.length = 0;
       updateHistoryUI();
@@ -184,10 +208,11 @@ window.CanvasLevelEditor = (() => {
     };
     const undo = () => {
       if (!state.history.length) return;
+      const label = state.history[state.history.length - 1]?.label || 'change';
       state.future.push(takeSnapshot());
       applySnapshot(state.history.pop());
       render();
-      toast('Undo');
+      toast('Undo: ' + label);
     };
     const redo = () => {
       if (!state.future.length) return;
@@ -207,6 +232,7 @@ window.CanvasLevelEditor = (() => {
       if (!safeSetItem(STORAGE_KEY, JSON.stringify(state.levels), 'levels')) return;
       publishSync({ announce: false });
       toast(state.sync.enabled ? 'Saved + synced to game' : 'Saved');
+      if (config.onSave) { try { config.onSave(cloneDeep(state.levels)); } catch (_) {} }
     };
     const load = () => {
       try {
@@ -457,14 +483,23 @@ window.CanvasLevelEditor = (() => {
 
       // Obstacles — delegate entirely to plugin
       L.obstacles.forEach((o, i) => {
+        if (state.hiddenTypes.has(o.type)) return;
         const inSet = state.selectedKind === 'obs' &&
           (state.selectedObsList.length ? state.selectedObsList.includes(i) : i === state.selectedObs);
         if (config.drawObstacle) {
           ctx.save();
-          const bbox = config.drawObstacle(ctx, o, inSet, state.zoom, L, LEFT_PAD, GY, CANVAS_H);
-          if (inSet && bbox) highlightRect(bbox[0], bbox[1], bbox[2], bbox[3]);
-          // Cache bbox from plugin return value OR from o._bbox set by plugin
-          if (bbox) o._bbox = bbox;
+          try {
+            const bbox = config.drawObstacle(ctx, o, inSet, state.zoom, L, LEFT_PAD, GY, CANVAS_H);
+            if (inSet && bbox) highlightRect(bbox[0], bbox[1], bbox[2], bbox[3]);
+            // Cache bbox from plugin return value OR from o._bbox set by plugin
+            if (bbox) o._bbox = bbox;
+          } catch (err) {
+            console.warn('[CanvasLevelEditor] drawObstacle error on obstacle', i, err);
+            const ex = (o.x ?? o.x1 ?? 0) + LEFT_PAD;
+            const ey = o.y ?? GY - 20;
+            ctx.fillStyle = '#ff0000';
+            ctx.fillRect(ex - 10, ey - 10, 20, 20);
+          }
           ctx.restore();
         }
       });
@@ -722,7 +757,7 @@ window.CanvasLevelEditor = (() => {
       const entry = state.publishHistory[index];
       if (!entry) return;
       if (!confirm(`Revert to publish from ${entry.label}? (${entry.total} level${entry.total === 1 ? '' : 's'})`)) return;
-      pushHistory(true);
+      pushHistory(true, 'Revert publish');
       state.levels = cloneDeep(entry.levels);
       if (!state.levels.length) state.currentIdx = -1;
       else state.currentIdx = Math.max(0, Math.min(state.currentIdx, state.levels.length - 1));
@@ -765,12 +800,28 @@ window.CanvasLevelEditor = (() => {
     const renderLevelList = () => {
       const ul = $('level-list');
       const filter = $('filter-court').value;
+      const searchVal = $('level-search')?.value?.toLowerCase() || '';
       ul.innerHTML = '';
-      state.levels.forEach((lvl, idx) => {
-        if (filter !== 'all') {
-          const want = filter === 'null' ? null : parseInt(filter, 10);
-          if ((lvl.courtId ?? null) !== want) return;
-        }
+      // Build index-aware list for sorting
+      let entries = state.levels.map((lvl, idx) => ({ lvl, idx }));
+      // Filter by court
+      if (filter !== 'all') {
+        const want = filter === 'null' ? null : parseInt(filter, 10);
+        entries = entries.filter(e => (e.lvl.courtId ?? null) === want);
+      }
+      // Filter by search
+      if (searchVal) {
+        entries = entries.filter(e => (e.lvl.data.name || '').toLowerCase().includes(searchVal));
+      }
+      // Sort
+      if (state.sortMode === 'name') {
+        entries = entries.slice().sort((a, b) => (a.lvl.data.name || '').localeCompare(b.lvl.data.name || ''));
+      } else if (state.sortMode === 'course') {
+        entries = entries.slice().sort((a, b) => (a.lvl.courtId ?? 9999) - (b.lvl.courtId ?? 9999));
+      } else if (state.sortMode === 'slot') {
+        entries = entries.slice().sort((a, b) => (a.lvl.slot ?? 9999) - (b.lvl.slot ?? 9999));
+      }
+      entries.forEach(({ lvl, idx }) => {
         const li = document.createElement('li');
         li.className = 'level-item' + (idx === state.currentIdx ? ' active' : '');
         const chipCls = lvl.courtId ? 'court-chip c' + lvl.courtId : 'court-chip unassigned';
@@ -1101,8 +1152,17 @@ window.CanvasLevelEditor = (() => {
       const info = $('selected-info');
       const lvl = state.levels[state.currentIdx];
       if (!lvl || state.selectedObs < 0 || state.selectedKind !== 'obs') {
-        if (body) body.innerHTML = '<div class="empty-state">Select an obstacle to edit properties.</div>';
         if (info) info.textContent = 'No selection';
+        if (body && lvl) {
+          // Show level statistics
+          const counts = {};
+          lvl.data.obstacles.forEach(o => { counts[o.type] = (counts[o.type] || 0) + 1; });
+          const rows = Object.entries(counts).sort((a, b) => b[1] - a[1])
+            .map(([t, n]) => `<div class="stat-row"><span class="stat-type">${t}</span><span class="stat-count">${n}</span></div>`).join('');
+          body.innerHTML = `<div class="empty-state level-stats"><strong>Obstacle count by type:</strong>${rows}<div class="stat-total">Total: ${lvl.data.obstacles.length} obstacles</div><div class="stat-world">World width: ${lvl.data.worldW}px</div></div>`;
+        } else if (body) {
+          body.innerHTML = '<div class="empty-state">Select an obstacle to edit properties.</div>';
+        }
         return;
       }
       if (state.selectedObsList.length > 1) {
@@ -1211,12 +1271,13 @@ window.CanvasLevelEditor = (() => {
           }
         }
       } catch (_) {}
+      emit('levelChange', state.levels[state.currentIdx]);
       render();
     };
 
     const placeObstacle = (type, x, y) => {
       const lvl = state.levels[state.currentIdx]; if (!lvl) return;
-      pushHistory(true);
+      pushHistory(true, 'Place ' + type);
       state.recentTypes = [type, ...state.recentTypes.filter(t => t !== type)].slice(0, 8);
       saveSettings();
       const o = { type, ...cloneDeep(SCHEMA[type].defaults) };
@@ -1246,7 +1307,7 @@ window.CanvasLevelEditor = (() => {
         .filter(i => i >= 0)
         .sort((a, b) => b - a);
       if (!ids.length) return;
-      pushHistory(true);
+      pushHistory(true, 'Delete');
       ids.forEach(i => lvl.data.obstacles.splice(i, 1));
       state.selectedObs = -1;
       state.selectedObsList = [];
@@ -1389,7 +1450,12 @@ window.CanvasLevelEditor = (() => {
         const primary = lvl.data.obstacles[state.drag.index];
         const neighborXs = lvl.data.obstacles
           .filter((ob, i) => !ids.includes(i))
-          .map(ob => ob.x ?? (ob.x1 != null ? (ob.x1 + ob.x2) / 2 : null))
+          .flatMap(ob => {
+            const pts = [];
+            if (ob.x1 != null) { pts.push(ob.x1, ob.x2, (ob.x1 + ob.x2) / 2); }
+            else if (ob.x != null) pts.push(ob.x);
+            return pts;
+          })
           .filter(x => x != null);
         state.smartGuideX = null;
         const snapToNeighbor = (val) => {
@@ -1541,9 +1607,37 @@ window.CanvasLevelEditor = (() => {
       clipboard = items;
       toast(items.length === 1 ? 'Copied ' + items[0].type : `Copied ${items.length} obstacles`);
     };
+    const pasteAtCenter = () => {
+      const lvl = state.levels[state.currentIdx]; if (!lvl || !clipboard || !clipboard.length) return;
+      pushHistory(true, 'Paste');
+      const w = wrapEl();
+      const centerX = w ? w.scrollLeft / state.zoom - LEFT_PAD + (w.clientWidth / state.zoom / 2) : 400;
+      const centerY = w ? w.scrollTop / state.zoom + (w.clientHeight / state.zoom / 2) : GY;
+      // Calculate clipboard centroid
+      let sumX = 0, count = 0;
+      clipboard.forEach(src => {
+        const cx = src.x ?? (src.x1 != null ? (src.x1 + src.x2) / 2 : 0);
+        sumX += cx; count++;
+      });
+      const clipCenterX = count ? sumX / count : 0;
+      const offX = centerX - clipCenterX;
+      const newIds = [];
+      clipboard.forEach(src => {
+        const o = cloneDeep(src);
+        if ('x' in o && !('x1' in o)) o.x = snap((o.x || 0) + offX);
+        if ('x1' in o) { o.x1 = snap(o.x1 + offX); o.x2 = snap(o.x2 + offX); }
+        lvl.data.obstacles.push(o);
+        newIds.push(lvl.data.obstacles.length - 1);
+      });
+      state.selectedObsList = newIds;
+      state.selectedObs = newIds[newIds.length - 1];
+      state.selectedKind = 'obs';
+      render();
+      toast(clipboard.length === 1 ? 'Pasted at center' : `Pasted ${clipboard.length} at center`);
+    };
     const pasteClipboard = () => {
       const lvl = state.levels[state.currentIdx]; if (!lvl || !clipboard || !clipboard.length) return;
-      pushHistory(true);
+      pushHistory(true, 'Paste');
       const off = 40;
       const newIds = [];
       clipboard.forEach(src => {
@@ -1588,7 +1682,8 @@ window.CanvasLevelEditor = (() => {
       if (!inField && mod && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); undo(); return; }
       if (!inField && mod && ((e.shiftKey && (e.key === 'z' || e.key === 'Z')) || e.key === 'y' || e.key === 'Y')) { e.preventDefault(); redo(); return; }
       if (!inField && mod && (e.key === 'c' || e.key === 'C')) { e.preventDefault(); copySelection(); return; }
-      if (!inField && mod && (e.key === 'v' || e.key === 'V')) { e.preventDefault(); pasteClipboard(); return; }
+      if (!inField && mod && e.shiftKey && (e.key === 'V')) { e.preventDefault(); pasteAtCenter(); return; }
+      if (!inField && mod && !e.shiftKey && (e.key === 'v' || e.key === 'V')) { e.preventDefault(); pasteClipboard(); return; }
       if (!inField && mod && (e.key === 'x' || e.key === 'X')) { e.preventDefault(); copySelection(); deleteSelected(); return; }
       if (!inField && mod && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); copySelection(); pasteClipboard(); return; }
       if (!inField && (e.key === '?' || (e.shiftKey && e.key === '/'))) {
@@ -1627,6 +1722,25 @@ window.CanvasLevelEditor = (() => {
           state.selectedObs = state.selectedObsList[state.selectedObsList.length - 1];
           render();
           toast(`Selected all (${state.selectedObsList.length})`);
+        }
+        return;
+      }
+      // Tool shortcuts (before inField guard)
+      if (!inField && e.key === '1') { e.preventDefault(); state.tool = 'select'; document.querySelectorAll('.asset-btn, .tool-btn').forEach(el => { el.classList.remove('active'); if (el.hasAttribute('aria-pressed')) el.setAttribute('aria-pressed', 'false'); }); document.querySelector('.tool-btn[data-tool="select"]')?.classList.add('active'); canvas.style.cursor = ''; saveSettings(); render(); return; }
+      if (!inField && e.key === '2') { e.preventDefault(); state.tool = 'eraser'; document.querySelectorAll('.asset-btn, .tool-btn').forEach(el => { el.classList.remove('active'); if (el.hasAttribute('aria-pressed')) el.setAttribute('aria-pressed', 'false'); }); document.querySelector('.tool-btn[data-tool="eraser"]')?.classList.add('active'); canvas.style.cursor = 'crosshair'; saveSettings(); render(); return; }
+      if (!inField && e.key === '3' && SCHEMA['ballStart']) { e.preventDefault(); state.tool = 'ballStart'; saveSettings(); render(); return; }
+      if (!inField && e.key === '4') { e.preventDefault(); state.tool = 'hole'; saveSettings(); render(); return; }
+      if (!inField && (e.key === 'g' || e.key === 'G') && !mod) { e.preventDefault(); state.showGrid = !state.showGrid; const og = $('opt-grid'); if (og) og.checked = state.showGrid; saveSettings(); render(); return; }
+      // Level reorder Alt+Arrow
+      if (!inField && e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && state.currentIdx >= 0) {
+        e.preventDefault();
+        const ci = state.currentIdx;
+        const target = e.key === 'ArrowUp' ? ci - 1 : ci + 1;
+        if (target >= 0 && target < state.levels.length) {
+          pushHistory(true, 'Reorder');
+          [state.levels[ci], state.levels[target]] = [state.levels[target], state.levels[ci]];
+          state.currentIdx = target;
+          render(); saveSettings();
         }
         return;
       }
@@ -1690,19 +1804,45 @@ window.CanvasLevelEditor = (() => {
       URL.revokeObjectURL(url);
     });
     $('btn-import').addEventListener('click', () => $('file-import').click());
+    const _importLevels = (arr) => {
+      if (!Array.isArray(arr)) throw new Error('not an array');
+      const valid = arr.filter(item => {
+        try {
+          return Array.isArray(item.data?.obstacles) &&
+            typeof item.data?.name === 'string' &&
+            typeof item.data?.ballStart?.x === 'number' &&
+            typeof item.data?.ballStart?.y === 'number' &&
+            typeof item.data?.hole?.x === 'number' &&
+            typeof item.data?.hole?.y === 'number';
+        } catch (_) { return false; }
+      });
+      const skipped = arr.length - valid.length;
+      pushHistory(true, 'Import');
+      state.levels = valid;
+      state.currentIdx = 0;
+      render();
+      toast(`Imported ${valid.length} levels${skipped ? ` (${skipped} skipped as invalid)` : ''}`);
+    };
     $('file-import').addEventListener('change', async (e) => {
       const f = e.target.files[0]; if (!f) return;
       try {
         const txt = await f.text();
-        const arr = JSON.parse(txt);
-        if (!Array.isArray(arr)) throw new Error('not an array');
-        pushHistory(true);
-        state.levels = arr;
-        state.currentIdx = 0;
-        render();
-        toast(`Imported ${arr.length} levels`);
+        _importLevels(JSON.parse(txt));
       } catch (err) { toast('Import failed: ' + err.message); }
       e.target.value = '';
+    });
+    // Drag-and-drop JSON import
+    document.body.addEventListener('dragover', (e) => {
+      if (e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }
+    });
+    document.body.addEventListener('drop', async (e) => {
+      const f = Array.from(e.dataTransfer?.files || []).find(f => f.name.endsWith('.json'));
+      if (!f) return;
+      e.preventDefault();
+      try {
+        const txt = await f.text();
+        _importLevels(JSON.parse(txt));
+      } catch (err) { toast('Drop import failed: ' + err.message); }
     });
     $('btn-load-game').addEventListener('click', loadFromGame);
     $('btn-sync-toggle').addEventListener('click', toggleSync);
@@ -1715,6 +1855,41 @@ window.CanvasLevelEditor = (() => {
       clearSync();
     });
     $('filter-court').addEventListener('change', () => { renderLevelList(); renderSlotGrid(); saveSettings(); });
+    $('level-search')?.addEventListener('input', () => renderLevelList());
+    // Course-specific export
+    $('btn-export-course')?.addEventListener('click', () => {
+      const filter = $('filter-court')?.value || 'all';
+      if (filter === 'all' || filter === 'null') {
+        const blob = new Blob([JSON.stringify(state.levels, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob); const a = document.createElement('a');
+        a.href = url; a.download = 'levels.json'; a.click(); URL.revokeObjectURL(url);
+        return;
+      }
+      const courseId = parseInt(filter, 10);
+      const filtered = state.levels.filter(l => l.courtId === courseId);
+      const blob = new Blob([JSON.stringify(filtered, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob); const a = document.createElement('a');
+      a.href = url; a.download = `levels-course-${courseId}.json`; a.click(); URL.revokeObjectURL(url);
+      toast(`Exported ${filtered.length} levels for course ${courseId}`);
+    });
+    // Fullscreen toggle
+    $('btn-fullscreen')?.addEventListener('click', () => {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen?.();
+        const b = $('btn-fullscreen'); if (b) b.textContent = 'Exit';
+      } else {
+        document.exitFullscreen?.();
+        const b = $('btn-fullscreen'); if (b) b.textContent = 'Full';
+      }
+    });
+    // Level sort cycle
+    $('btn-sort-levels')?.addEventListener('click', () => {
+      const modes = ['none', 'name', 'course', 'slot'];
+      const next = modes[(modes.indexOf(state.sortMode) + 1) % modes.length];
+      state.sortMode = next;
+      const b = $('btn-sort-levels'); if (b) b.textContent = 'Sort: ' + next;
+      renderLevelList();
+    });
     $('opt-grid').addEventListener('change', (e) => { state.showGrid = e.target.checked; saveSettings(); render(); });
     $('opt-ruler')?.addEventListener('change', (e) => { state.showRuler = e.target.checked; saveSettings(); render(); });
     $('opt-snap').addEventListener('change', (e) => { state.snap = e.target.checked; saveSettings(); });
@@ -1782,6 +1957,35 @@ window.CanvasLevelEditor = (() => {
         panState.dragging = false;
         canvas.style.cursor = panState.spaceDown ? 'grab' : '';
       }
+    });
+
+    // ---------- Scroll wheel zoom ----------
+    canvas.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+      state.zoom = Math.min(2, Math.max(0.2, state.zoom * factor));
+      resizeCanvas(); render(); saveSettings();
+    }, { passive: false });
+
+    // ---------- Touch support ----------
+    const synthMouse = (type, touch) => {
+      const me = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: touch.clientX, clientY: touch.clientY, button: 0 });
+      return me;
+    };
+    canvas.addEventListener('touchstart', (e) => {
+      if (e.target !== canvas) return;
+      e.preventDefault();
+      canvas.dispatchEvent(synthMouse('mousedown', e.touches[0]));
+    }, { passive: false });
+    canvas.addEventListener('touchmove', (e) => {
+      if (e.target !== canvas) return;
+      e.preventDefault();
+      canvas.dispatchEvent(synthMouse('mousemove', e.touches[0]));
+    }, { passive: false });
+    canvas.addEventListener('touchend', (e) => {
+      if (e.target !== canvas) return;
+      const t = e.changedTouches[0];
+      canvas.dispatchEvent(synthMouse('mouseup', t));
     });
 
     // ---------- Minimap ----------
@@ -1930,6 +2134,7 @@ window.CanvasLevelEditor = (() => {
 
     // ---------- Main render ----------
     const render = () => {
+      emit('obstacleSelect', { obs: state.selectedObs, kind: state.selectedKind });
       resizeCanvas();
       renderCanvas();
       renderLevelList();
@@ -2154,7 +2359,27 @@ window.CanvasLevelEditor = (() => {
       getCanvas() { return canvas; },
       zen(on = true) { document.body.classList.toggle('is-zen', on); fitCanvas(); render(); },
       getState() { return state; },
-      render
+      render,
+      getLevels() { return cloneDeep(state.levels); },
+      setLevels(arr) {
+        if (!Array.isArray(arr)) return;
+        pushHistory(true, 'setLevels');
+        state.levels = cloneDeep(arr);
+        state.currentIdx = Math.max(0, Math.min(state.currentIdx, state.levels.length - 1));
+        render();
+      },
+      on(event, cb) {
+        (_listeners[event] = _listeners[event] || []).push(cb);
+      },
+      off(event, cb) {
+        if (!_listeners[event]) return;
+        _listeners[event] = _listeners[event].filter(f => f !== cb);
+      },
+      toggleTypeVisibility(type) {
+        if (state.hiddenTypes.has(type)) state.hiddenTypes.delete(type);
+        else state.hiddenTypes.add(type);
+        render();
+      }
     };
   }; // end create()
 
