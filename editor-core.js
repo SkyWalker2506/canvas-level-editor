@@ -130,7 +130,9 @@ window.CanvasLevelEditor = (() => {
       pasteOffset: config.pasteOffset ?? 20,
       _pasteCount: 0,
       _lastClipboardKey: null,
-      _savedSnapshot: null
+      _savedSnapshot: null,
+      pendingPrefab: null,
+      pendingPrefabX: 0
     };
 
     // ---------- Event system ----------
@@ -406,6 +408,38 @@ window.CanvasLevelEditor = (() => {
       render();
       toast('Inserted ' + prefab.name);
     };
+    const cancelPrefabPlace = () => {
+      state.pendingPrefab = null;
+      canvas.style.cursor = '';
+      const bar = document.getElementById('prefab-place-bar');
+      if (bar) bar.style.display = 'none';
+      scheduleRender();
+    };
+
+    const startPrefabPlace = (prefab) => {
+      const lvl = state.levels[state.currentIdx]; if (!lvl) { toast('Select a level first'); return; }
+      state.pendingPrefab = prefab;
+      // Default X to viewport center until mouse moves
+      const w = document.getElementById('canvas-wrap');
+      state.pendingPrefabX = w && state.zoom
+        ? Math.round(w.scrollLeft / state.zoom - LEFT_PAD + w.clientWidth / state.zoom / 2)
+        : lvl.data.ballStart.x + 150;
+      canvas.style.cursor = 'crosshair';
+      // Show cancel bar
+      let bar = document.getElementById('prefab-place-bar');
+      if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'prefab-place-bar';
+        bar.style.cssText = 'position:fixed;bottom:48px;left:50%;transform:translateX(-50%);background:#1a2a40;color:#fff;padding:8px 16px;border-radius:8px;display:flex;align-items:center;gap:12px;z-index:9999;box-shadow:0 2px 12px rgba(0,0,0,0.5);font-size:13px;';
+        bar.innerHTML = `<span>Placing: <strong id="prefab-place-name"></strong> — click canvas to place</span><button id="prefab-place-cancel" style="background:#c0392b;color:#fff;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;">Cancel</button>`;
+        document.body.appendChild(bar);
+        document.getElementById('prefab-place-cancel').addEventListener('click', cancelPrefabPlace);
+      }
+      document.getElementById('prefab-place-name').textContent = prefab.name;
+      bar.style.display = 'flex';
+      scheduleRender();
+    };
+
     const deletePrefab = (id) => {
       state.userPrefabs = state.userPrefabs.filter(p => p.id !== id);
       savePrefabsToStorage();
@@ -427,8 +461,8 @@ window.CanvasLevelEditor = (() => {
           <div class="prefab-name">${p.name}</div>
           ${p.desc ? `<div class="prefab-desc">${p.desc}</div>` : ''}
           <div class="prefab-meta">${p.obstacles.length} obj${p.user ? ' · user' : ''}</div>`;
-        card.title = 'Click to insert at viewport center';
-        card.addEventListener('click', () => insertPrefab(p));
+        card.title = 'Click to place on canvas';
+        card.addEventListener('click', () => startPrefabPlace(p));
         if (p.user) {
           const del = document.createElement('button');
           del.className = 'prefab-delete';
@@ -464,10 +498,12 @@ window.CanvasLevelEditor = (() => {
         const id = parseInt(sel, 10);
         if (COURSES[id]) courtId = id;
       }
+      const course = courtId != null ? COURSES[courtId] : null;
+      const def = course?.defaultLevel ? cloneDeep(course.defaultLevel) : {};
       return {
         courtId,
         slot: null,
-        data: {
+        data: Object.assign({
           name: 'New Level',
           subtitle: '',
           description: '',
@@ -478,7 +514,7 @@ window.CanvasLevelEditor = (() => {
           maxShots: 4,
           starShots: [2, 3, 4],
           obstacles: []
-        }
+        }, def)
       };
     };
 
@@ -728,6 +764,37 @@ window.CanvasLevelEditor = (() => {
         ctx.setLineDash([4, 3]);
         ctx.fillRect(x1, y1, w, h);
         ctx.strokeRect(x1, y1, w, h);
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
+      // Prefab ghost preview
+      if (state.pendingPrefab && config.drawObstacle) {
+        const pf = state.pendingPrefab;
+        const minX = pf.obstacles.reduce((m, o) => {
+          const ox = 'x1' in o ? o.x1 : (o.x ?? 0);
+          return Math.min(m, ox);
+        }, Infinity);
+        const dx = state.pendingPrefabX - (isFinite(minX) ? minX : 0);
+        ctx.save();
+        ctx.globalAlpha = 0.45;
+        pf.obstacles.forEach(src => {
+          const o = cloneDeep(src);
+          if ('x1' in o) { o.x1 += dx; o.x2 += dx; if (o.crocX != null) o.crocX += dx; }
+          else if ('x' in o) o.x += dx;
+          try { config.drawObstacle(ctx, o, false, state.zoom, L, LEFT_PAD, GY, CANVAS_H); } catch (_) {}
+        });
+        ctx.restore();
+        // Vertical guide line at placement X
+        ctx.save();
+        ctx.shadowColor = 'transparent';
+        ctx.strokeStyle = 'rgba(255,200,0,0.7)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.moveTo(state.pendingPrefabX + LEFT_PAD, 0);
+        ctx.lineTo(state.pendingPrefabX + LEFT_PAD, CANVAS_H);
+        ctx.stroke();
         ctx.setLineDash([]);
         ctx.restore();
       }
@@ -2060,6 +2127,12 @@ window.CanvasLevelEditor = (() => {
     canvas.addEventListener('mousedown', (e) => {
       const p = canvasPt(e);
       if (panState.spaceDown) return;
+      // Prefab placement mode — click to place
+      if (state.pendingPrefab) {
+        insertPrefab(state.pendingPrefab, state.pendingPrefabX);
+        cancelPrefabPlace();
+        e.preventDefault(); e.stopPropagation(); return;
+      }
       // World resize handle
       if (nearWorldResizeHandle(p) && state.levels[state.currentIdx]) {
         const lvl = state.levels[state.currentIdx];
@@ -2140,6 +2213,7 @@ window.CanvasLevelEditor = (() => {
         const snapIndicator = state.snap ? ' [snap]' : '';
         cp.textContent = `x: ${Math.round(p.x - LEFT_PAD)}  y: ${Math.round(p.y)}${snapIndicator}`;
       }
+      if (state.pendingPrefab) { state.pendingPrefabX = Math.round(p.x - LEFT_PAD); scheduleRender(); return; }
       if (state.marquee) { state.marquee.endX = p.x; state.marquee.endY = p.y; scheduleRender(); return; }
       if (!state.drag) return;
       const lvl = state.levels[state.currentIdx]; if (!lvl) return;
@@ -2623,6 +2697,7 @@ window.CanvasLevelEditor = (() => {
         return;
       }
       if (e.key === 'Escape') {
+        if (state.pendingPrefab) { cancelPrefabPlace(); e.preventDefault(); return; }
         const h = $('help-overlay');
         if (h && h.style.display !== 'none') { h.style.display = 'none'; e.preventDefault(); return; }
       }
@@ -2911,7 +2986,50 @@ window.CanvasLevelEditor = (() => {
       if (!confirm('Clear sync? The game will revert to baked levels.')) return;
       clearSync();
     });
-    $('filter-court').addEventListener('change', () => { renderLevelList(); renderSlotGrid(); renderPalette(); saveSettings(); });
+    $('filter-court').addEventListener('change', () => {
+      renderLevelList(); renderSlotGrid(); renderPalette(); saveSettings();
+      const sel = $('filter-court').value;
+      if (sel && sel !== 'all' && sel !== 'null') {
+        const courseId = parseInt(sel, 10);
+        // Find first level (smallest slot) for this course
+        let firstIdx = -1, minSlot = Infinity;
+        state.levels.forEach((l, i) => {
+          if (l.courtId === courseId) {
+            const s = l.slot ?? Infinity;
+            if (s < minSlot) { minSlot = s; firstIdx = i; }
+          }
+        });
+        if (firstIdx >= 0) {
+          selectLevel(firstIdx);
+        } else {
+          // No levels — create from defaultLevel template if available
+          const course = COURSES[courseId];
+          if (course && course.defaultLevel) {
+            const def = cloneDeep(course.defaultLevel);
+            const lvl = {
+              courtId: courseId,
+              slot: null,
+              data: Object.assign({
+                name: course.name + ' — Starter',
+                subtitle: '',
+                worldW: 800,
+                time: 0.3,
+                ballStart: { x: 100, y: GY - 30 },
+                hole: { x: 700, y: GY },
+                maxShots: 4,
+                starShots: [2, 3, 4],
+                obstacles: []
+              }, def)
+            };
+            state.levels.push(lvl);
+            save();
+            renderLevelList();
+            selectLevel(state.levels.length - 1);
+            toast('Default scene created for ' + course.name);
+          }
+        }
+      }
+    });
     $('level-search')?.addEventListener('input', () => renderLevelList());
     // Course-specific export
     $('btn-export-course')?.addEventListener('click', () => {
