@@ -2980,6 +2980,16 @@ window.CanvasLevelEditor = (() => {
     $('btn-sync-toggle').addEventListener('click', toggleSync);
     $('btn-play-current').addEventListener('click', () => playInGame());
     $('btn-play-canvas')?.addEventListener('click', () => playInGame());
+    $('btn-reset-canvas')?.addEventListener('click', () => {
+      const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+      const course = lvl.courtId != null ? COURSES[lvl.courtId] : null;
+      if (!course?.defaultLevel) { toast('No default scene for this course'); return; }
+      if (!confirm('Reset scene to default? Current obstacles will be lost.')) return;
+      pushHistory(true);
+      const def = cloneDeep(course.defaultLevel);
+      Object.assign(lvl.data, { obstacles: [] }, def);
+      save(); render(); toast('Scene reset to default');
+    });
     document.getElementById('canvas-wrap')?.addEventListener('scroll', () => { renderMinimap(); });
     $('btn-sync-publish').addEventListener('click', () => publishSync({ announce: true }));
     $('btn-sync-clear').addEventListener('click', () => {
