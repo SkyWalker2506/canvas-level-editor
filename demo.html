@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>canvas-level-editor — Demo</title>
+  <link rel="stylesheet" href="editor-core.css">
+  <style>
+    body { margin: 0; font-family: sans-serif; background: #1a1a2e; }
+  </style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════ LAYOUT -->
+<div id="editor-root">
+
+  <!-- Top bar -->
+  <div id="topbar">
+    <span id="current-level-name" class="topbar-title">—</span>
+    <div class="topbar-actions">
+      <button id="btn-new-level" class="btn">+ New</button>
+      <button id="btn-duplicate-level" class="btn">Dup</button>
+      <button id="btn-delete-level" class="btn btn-danger">Del</button>
+      <span class="sep"></span>
+      <button id="btn-undo" class="btn" disabled>↩ Undo</button>
+      <button id="btn-redo" class="btn" disabled>↪ Redo</button>
+      <span class="sep"></span>
+      <button id="btn-save" class="btn btn-success">💾 Save</button>
+      <button id="btn-export" class="btn">⬇ Export</button>
+      <button id="btn-import" class="btn">⬆ Import</button>
+      <input type="file" id="file-import" accept=".json" style="display:none">
+      <span class="sep"></span>
+      <button id="btn-zoom-out" class="btn">−</button>
+      <span id="zoom-label" style="min-width:42px;text-align:center;cursor:pointer">100%</span>
+      <button id="btn-zoom-in" class="btn">+</button>
+      <button id="btn-zoom-fit" class="btn">Fit</button>
+      <span class="sep"></span>
+      <button id="btn-play-current" class="btn btn-success">▶ Play</button>
+      <button id="btn-load-game" class="btn" style="display:none">↺ Reload</button>
+      <button id="btn-help" class="btn">?</button>
+    </div>
+    <div id="autosave-dot"></div>
+  </div>
+
+  <!-- Status strip -->
+  <div id="statusbar">
+    <span id="status-level">No level</span>
+    <span id="status-issues" style="display:none"><span id="status-issues-text"></span></span>
+    <span id="status-save" style="display:none">✓ saved</span>
+    <span id="status-game" style="display:none">🎮 Game open</span>
+    <span id="cursor-pos" style="margin-left:auto;font-size:11px;opacity:.6"></span>
+  </div>
+
+  <!-- Main 3-col layout -->
+  <div id="workspace">
+
+    <!-- LEFT PANEL -->
+    <aside id="left-panel">
+
+      <div class="panel" id="panel-levels">
+        <h3>Levels <span id="level-count" class="badge">0</span></h3>
+        <div class="panel-body">
+          <input id="level-search" type="search" placeholder="Search levels…" style="width:100%;box-sizing:border-box;margin-bottom:6px">
+          <select id="filter-court" style="width:100%;margin-bottom:6px">
+            <option value="all">All courses</option>
+            <option value="null">Unassigned</option>
+            <option value="1">Course 1</option>
+            <option value="2">Course 2</option>
+          </select>
+          <ul id="level-list"></ul>
+          <div id="slot-grid-wrap" style="display:none">
+            <div id="slot-grid-title"></div>
+            <div id="slot-grid-stats"></div>
+            <div id="slot-grid"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" id="panel-config">
+        <h3>Level Config</h3>
+        <div class="panel-body">
+          <div class="form-row"><label>Name</label><input id="in-name" type="text"></div>
+          <div class="form-row"><label>Subtitle</label><input id="in-subtitle" type="text"></div>
+          <div class="form-row"><label>World W</label><input id="in-worldW" type="number" min="400" max="8000"></div>
+          <div class="form-row"><label>Time</label><input id="in-time" type="number" step="0.1"></div>
+          <div class="form-row"><label>Max shots</label><input id="in-maxShots" type="number"></div>
+          <div class="form-row"><label>Star shots</label><input id="in-starShots" type="text" placeholder="1,2,3"></div>
+          <div class="form-row"><label>Ball X</label><input id="in-ballX" type="number"></div>
+          <div class="form-row"><label>Hole X</label><input id="in-holeX" type="number"></div>
+          <div class="form-row"><label>Course</label>
+            <select id="in-court">
+              <option value="null">— none —</option>
+              <option value="1">Course 1</option>
+              <option value="2">Course 2</option>
+            </select>
+          </div>
+          <div class="form-row"><label>Slot</label><input id="in-slot" type="number"></div>
+          <div id="slot-warning" style="color:#e74;font-size:11px"></div>
+          <div class="form-row">
+            <label>Obstacles</label>
+            <span id="obstacle-count">0</span>
+            &nbsp;<span id="world-width-display" style="opacity:.5;font-size:11px"></span>
+          </div>
+          <div id="scoring-hud" style="cursor:pointer;font-size:12px;padding:4px 0"></div>
+        </div>
+      </div>
+
+    </aside><!-- /left-panel -->
+
+    <!-- CENTER: Canvas -->
+    <div id="canvas-wrap">
+      <canvas id="editor-canvas"></canvas>
+      <div id="minimap-wrap">
+        <canvas id="minimap" height="40"></canvas>
+      </div>
+    </div>
+
+    <!-- RIGHT PANEL -->
+    <aside id="right-panel">
+
+      <div class="panel" id="panel-tools">
+        <h3>Tools</h3>
+        <div class="panel-body">
+          <div class="tool-row">
+            <button class="tool-btn active" data-tool="select" title="Select (1)">↖ Select</button>
+            <button class="tool-btn" data-tool="eraser" title="Eraser (2)">⌫ Erase</button>
+            <button class="tool-btn" data-tool="ballStart" title="Ball (3)">● Ball</button>
+            <button class="tool-btn" data-tool="hole" title="Hole (4)">⛳ Hole</button>
+          </div>
+          <div class="opt-row">
+            <label><input type="checkbox" id="opt-grid" checked> Grid</label>
+            <label><input type="checkbox" id="opt-snap" checked> Snap</label>
+            <label><input type="checkbox" id="opt-ruler"> Ruler</label>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" id="panel-palette">
+        <h3>Assets</h3>
+        <div class="panel-body">
+          <div id="palette-course-label" style="font-size:11px;opacity:.6;margin-bottom:4px"></div>
+          <div id="asset-recent"></div>
+          <div id="asset-palette"></div>
+        </div>
+      </div>
+
+      <div class="panel" id="panel-props">
+        <h3>Properties <span id="selected-info" style="font-size:11px;opacity:.6"></span></h3>
+        <div id="props-body" class="panel-body"></div>
+      </div>
+
+      <div class="panel" id="panel-prefabs">
+        <h3>Prefabs</h3>
+        <div class="panel-body">
+          <button id="btn-save-prefab" class="btn btn-mini" style="margin-bottom:6px">Save selection as prefab</button>
+          <div id="prefabs-list"></div>
+        </div>
+      </div>
+
+      <div class="panel" id="panel-validation">
+        <h3>Validation</h3>
+        <div class="panel-body">
+          <ul id="validation-list"></ul>
+        </div>
+      </div>
+
+      <div class="panel" id="panel-sync">
+        <h3>Sync</h3>
+        <div class="panel-body">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+            <span id="sync-dot" class="sync-dot off"></span>
+            <span id="sync-label">Sync OFF</span>
+          </div>
+          <div id="sync-summary"></div>
+          <div id="sync-warnings"></div>
+          <div class="action-row" style="margin-top:8px">
+            <button id="btn-sync-toggle" class="btn btn-mini">Sync: OFF</button>
+            <button id="btn-sync-publish" class="btn btn-mini">Publish</button>
+            <button id="btn-sync-clear" class="btn btn-mini btn-danger">Clear</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" id="panel-history">
+        <h3>Publish History</h3>
+        <div class="panel-body">
+          <ul id="publish-history-list"></ul>
+        </div>
+      </div>
+
+    </aside><!-- /right-panel -->
+
+  </div><!-- /workspace -->
+
+</div><!-- /editor-root -->
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<!-- Context menu -->
+<div id="context-menu" style="display:none"></div>
+
+<!-- Help overlay -->
+<div id="help-overlay" style="display:none">
+  <div id="help-box">
+    <h2>Keyboard Shortcuts</h2>
+    <button id="help-close">✕</button>
+    <ul id="help-shortcuts"></ul>
+  </div>
+</div>
+
+<script src="editor-core.js"></script>
+<script>
+  // ── Demo config ──────────────────────────────────────────────────────────
+  const SCHEMA = {
+    box:      { fields: ['x','y','w','h'], defaults: { x: 200, y: 320, w: 80, h: 20 } },
+    ramp:     { fields: ['x1','x2','y','dir'], defaults: { x1: 200, x2: 340, y: 320, dir: 1 } },
+    platform: { fields: ['x1','x2','y'], defaults: { x1: 200, x2: 340, y: 260 } },
+    bumper:   { fields: ['x','y','r'], defaults: { x: 300, y: 280, r: 25 } },
+    spring:   { fields: ['x','y','strength'], defaults: { x: 300, y: 380, strength: 8 } },
+  };
+
+  const TYPE_COLORS = {
+    box:      '#e67e22',
+    ramp:     '#3498db',
+    platform: '#2ecc71',
+    bumper:   '#e74c3c',
+    spring:   '#9b59b6',
+  };
+
+  const COURSES = {
+    1: { id: 1, name: 'Forest', slotCount: 9, gameKey: 'forest', theme: { sky1: '#87ceeb', sky2: '#e0f0ff', ground: '#5a8a3c', dirt: '#7a5a38' }, allowed: ['box','ramp','platform','bumper','spring'] },
+    2: { id: 2, name: 'Desert', slotCount: 9, gameKey: 'desert', theme: { sky1: '#f39c12', sky2: '#fde68a', ground: '#c8a265', dirt: '#8B6914' }, allowed: ['box','ramp','platform','bumper'] },
+  };
+
+  const editor = window.CanvasLevelEditor.create({
+    schema:         SCHEMA,
+    courses:        COURSES,
+    typeColors:     TYPE_COLORS,
+    assetTooltips:  { box: 'Solid block', ramp: 'Slope', platform: 'Floating platform', bumper: 'Circular bumper', spring: 'Launch spring' },
+    builtinPrefabs: [
+      { id: 'stairs', name: 'Stair Set', desc: '3 rising platforms', obstacles: [
+        { type: 'platform', x1: 0,   x2: 80,  y: 380 },
+        { type: 'platform', x1: 80,  x2: 160, y: 340 },
+        { type: 'platform', x1: 160, x2: 240, y: 300 },
+      ]},
+      { id: 'arch', name: 'Arch Gate', desc: 'Two pillars + top bar', obstacles: [
+        { type: 'box', x: 0,   y: 360, w: 20, h: 60 },
+        { type: 'box', x: 120, y: 360, w: 20, h: 60 },
+        { type: 'box', x: 0,   y: 300, w: 140, h: 15 },
+      ]},
+      { id: 'bumper-pair', name: 'Bumper Pair', desc: 'Two bumpers side by side', obstacles: [
+        { type: 'bumper', x: 0,  y: 320, r: 22 },
+        { type: 'bumper', x: 80, y: 320, r: 22 },
+      ]},
+    ],
+    courseNames:  { 1: 'Forest', 2: 'Desert' },
+    groundY:      380,
+    canvasHeight: 540,
+
+    drawObstacle(ctx, o, selected, zoom, lvlData, leftPad, groundY) {
+      const col = TYPE_COLORS[o.type] || '#888';
+      ctx.fillStyle = selected ? '#fff' : col;
+      ctx.strokeStyle = selected ? col : 'rgba(0,0,0,0.3)';
+      ctx.lineWidth = selected ? 2 : 1;
+      let bbox;
+      if (o.type === 'bumper') {
+        const cx = (o.x || 0) + leftPad, cy = o.y || groundY;
+        ctx.beginPath(); ctx.arc(cx, cy, o.r || 20, 0, Math.PI*2);
+        ctx.fill(); ctx.stroke();
+        bbox = [cx - (o.r||20), cy - (o.r||20), (o.r||20)*2, (o.r||20)*2];
+      } else if ('x1' in o) {
+        const x = o.x1 + leftPad, y = o.y || groundY, h = 18;
+        ctx.fillRect(x, y - h, o.x2 - o.x1, h);
+        ctx.strokeRect(x, y - h, o.x2 - o.x1, h);
+        bbox = [x, y - h, o.x2 - o.x1, h];
+      } else {
+        const x = (o.x||0) + leftPad, y = (o.y||groundY) - (o.h||20);
+        ctx.fillRect(x, y, o.w||60, o.h||20);
+        ctx.strokeRect(x, y, o.w||60, o.h||20);
+        bbox = [x, y, o.w||60, o.h||20];
+      }
+      // type label
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.font = '10px sans-serif';
+      ctx.fillText(o.type, bbox[0]+3, bbox[1]+11);
+      return bbox;
+    },
+
+    validateLevel(level, course) {
+      const issues = [];
+      const L = level.data;
+      if (!L.name) issues.push({ level: 'warn', msg: 'Level has no name' });
+      if (L.obstacles.length === 0) issues.push({ level: 'warn', msg: 'No obstacles placed' });
+      const dist = Math.abs(L.hole.x - L.ballStart.x);
+      if (dist < 100) issues.push({ level: 'error', msg: 'Ball and hole are too close (' + dist + 'px)' });
+      return issues;
+    },
+
+    onSave(levels)   { console.log('[demo] saved', levels.length, 'levels'); },
+    onChange(level)  { /* real-time */ },
+  });
+
+  console.log('[demo] editor ready', editor);
+</script>
+</body>
+</html>

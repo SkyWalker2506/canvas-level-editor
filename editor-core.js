@@ -291,7 +291,10 @@ window.CanvasLevelEditor = (() => {
         toast('A prefab named "' + name + '" already exists. Use a different name.');
         return;
       }
-      const src = state.selectedObsList.map(i => cloneDeep(lvl.data.obstacles[i]));
+      // Filter out stale indices that no longer exist in the obstacles array
+      const validIndices = state.selectedObsList.filter(i => i >= 0 && i < lvl.data.obstacles.length);
+      if (!validIndices.length) { toast('No valid obstacles selected'); return; }
+      const src = validIndices.map(i => cloneDeep(lvl.data.obstacles[i]));
       const minX = Math.min(...src.map(o => o.x ?? o.x1 ?? 0));
       src.forEach(o => {
         if ('x1' in o) { o.x1 -= minX; o.x2 -= minX; if (o.crocX != null) o.crocX -= minX; }
@@ -305,7 +308,17 @@ window.CanvasLevelEditor = (() => {
     };
     const insertPrefab = (prefab, insertX) => {
       const lvl = state.levels[state.currentIdx]; if (!lvl) return;
-      if (insertX == null) insertX = lvl.data.ballStart.x + 150;
+      if (insertX == null) {
+        // Insert at viewport center (like paste), falling back to ballStart + 150
+        const w = document.getElementById('canvas-wrap');
+        if (w && state.zoom) {
+          insertX = Math.round(w.scrollLeft / state.zoom - LEFT_PAD + (w.clientWidth / state.zoom / 2));
+        } else {
+          insertX = lvl.data.ballStart.x + 150;
+        }
+        // Clamp to world bounds
+        insertX = Math.max(0, Math.min(lvl.data.worldW - 50, insertX));
+      }
       pushHistory(true);
       const newIds = [];
       prefab.obstacles.forEach(src => {
@@ -335,13 +348,14 @@ window.CanvasLevelEditor = (() => {
       wrap.innerHTML = '';
       if (!all.length) { wrap.innerHTML = '<div class="empty-state">No prefabs.</div>'; return; }
       all.forEach(p => {
+        if (!p || !Array.isArray(p.obstacles)) return; // skip malformed prefabs
         const card = document.createElement('div');
         card.className = 'prefab-card' + (p.user ? ' prefab-user' : '');
         card.innerHTML = `
           <div class="prefab-name">${p.name}</div>
           ${p.desc ? `<div class="prefab-desc">${p.desc}</div>` : ''}
           <div class="prefab-meta">${p.obstacles.length} obj${p.user ? ' · user' : ''}</div>`;
-        card.title = 'Click to insert at ball start + 150';
+        card.title = 'Click to insert at viewport center';
         card.addEventListener('click', () => insertPrefab(p));
         if (p.user) {
           const del = document.createElement('button');
