@@ -6,6 +6,35 @@
   <link rel="stylesheet" href="editor-core.css">
   <style>
     body { margin: 0; font-family: sans-serif; background: #1a1a2e; }
+
+    /* Feature 4: level stats line in level list */
+    .level-stats {
+      display: block;
+      font-size: 11px;
+      opacity: 0.5;
+      margin-left: 2px;
+      pointer-events: none;
+    }
+
+    /* Feature 5: obstacle count flash animation */
+    @keyframes obs-count-flash-add {
+      0%   { color: inherit; background: transparent; }
+      30%  { color: #1e1; background: rgba(0,200,80,0.18); border-radius: 3px; }
+      100% { color: inherit; background: transparent; }
+    }
+    @keyframes obs-count-flash-remove {
+      0%   { color: inherit; background: transparent; }
+      30%  { color: #e44; background: rgba(220,50,50,0.18); border-radius: 3px; }
+      100% { color: inherit; background: transparent; }
+    }
+    #obstacle-count.obs-count-add    { animation: obs-count-flash-add    0.6s ease forwards; }
+    #obstacle-count.obs-count-remove { animation: obs-count-flash-remove 0.6s ease forwards; }
+
+    /* Feature 5 level drag reorder */
+    .level-item { cursor: grab; }
+    .level-item.level-drag-source { opacity: 0.4; }
+    .level-item.level-drag-over { background: rgba(80,140,255,0.12); }
+    .level-drop-indicator { height: 2px; background: #4080ff; border-radius: 1px; margin: 1px 4px; pointer-events: none; }
   </style>
 </head>
 <body>
@@ -17,7 +46,7 @@
   <div id="topbar">
     <span id="current-level-name" class="topbar-title">—</span>
     <div class="topbar-actions">
-      <button id="btn-new-level" class="btn">+ New</button>
+      <button id="btn-new-level" class="btn" title="New level (click for templates)">+ New ▾</button>
       <button id="btn-duplicate-level" class="btn">Dup</button>
       <button id="btn-delete-level" class="btn btn-danger">Del</button>
       <span class="sep"></span>
@@ -298,6 +327,52 @@
 
     onSave(levels)   { console.log('[demo] saved', levels.length, 'levels'); },
     onChange(level)  { /* real-time */ },
+
+    // Feature 4: Level templates
+    levelTemplates: [
+      {
+        name: 'Wide Forest Platform Run',
+        data: {
+          name: 'Forest Platform Run',
+          subtitle: 'Lots of platforms',
+          worldW: 1400,
+          time: 0.3,
+          maxShots: 5,
+          starShots: [2, 3, 4],
+          ballStart: { x: 80, y: 350 },
+          hole: { x: 1300, y: 380 },
+          obstacles: [
+            { type: 'platform', x1: 150, x2: 280, y: 300 },
+            { type: 'platform', x1: 350, x2: 480, y: 260 },
+            { type: 'platform', x1: 550, x2: 680, y: 300 },
+            { type: 'bumper',   x: 740,  y: 300,  r: 22 },
+            { type: 'platform', x1: 850, x2: 980, y: 260 },
+            { type: 'spring',   x: 1050, y: 380,  strength: 10 },
+          ]
+        }
+      },
+      {
+        name: 'Bumper Arena',
+        data: {
+          name: 'Bumper Arena',
+          subtitle: 'Navigate the bumpers',
+          worldW: 900,
+          time: 0.3,
+          maxShots: 4,
+          starShots: [2, 3, 4],
+          ballStart: { x: 80, y: 350 },
+          hole: { x: 820, y: 380 },
+          obstacles: [
+            { type: 'bumper', x: 200, y: 280, r: 28 },
+            { type: 'bumper', x: 340, y: 320, r: 22 },
+            { type: 'bumper', x: 480, y: 260, r: 32 },
+            { type: 'bumper', x: 620, y: 300, r: 25 },
+            { type: 'box',    x: 140, y: 360, w: 40, h: 15 },
+            { type: 'box',    x: 660, y: 360, w: 40, h: 15 },
+          ]
+        }
+      }
+    ],
   });
 
   console.log('[demo] editor ready', editor);

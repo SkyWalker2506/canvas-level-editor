@@ -108,7 +108,9 @@ window.CanvasLevelEditor = (() => {
       hiddenTypes: new Set(),
       sortMode: 'none',
       lockedObs: new Set(),
-      gridSize: config.gridSize || GRID
+      gridSize: config.gridSize || GRID,
+      _worldResizeHover: false,
+      _worldResizeDrag: null
     };
 
     // ---------- Event system ----------
@@ -126,6 +128,16 @@ window.CanvasLevelEditor = (() => {
       toast._t = setTimeout(() => t.classList.remove('show'), ms);
     };
     const cloneDeep = (o) => JSON.parse(JSON.stringify(o));
+    const _flashObsCount = (direction) => {
+      const el = $('obstacle-count'); if (!el) return;
+      el.classList.remove('obs-count-add', 'obs-count-remove');
+      void el.offsetWidth; // force reflow to restart animation
+      el.classList.add(direction === 'add' ? 'obs-count-add' : 'obs-count-remove');
+      clearTimeout(_flashObsCount._t);
+      _flashObsCount._t = setTimeout(() => {
+        el.classList.remove('obs-count-add', 'obs-count-remove');
+      }, 600);
+    };
     const snap = (v) => state.snap ? Math.round(v / state.gridSize) * state.gridSize : Math.round(v);
 
     // ---------- rAF-batched render ----------
@@ -243,8 +255,18 @@ window.CanvasLevelEditor = (() => {
     };
     const updateHistoryUI = () => {
       const u = $('btn-undo'); const r = $('btn-redo');
-      if (u) u.disabled = !state.history.length;
-      if (r) r.disabled = !state.future.length;
+      if (u) {
+        u.disabled = !state.history.length;
+        // Feature 5: tooltip listing last 5 undo labels
+        const undoLabels = state.history.slice(-5).reverse().map((s, i) => `${i + 1}. ${s.label || 'change'}`);
+        u.title = undoLabels.length ? 'Undo:\n' + undoLabels.join('\n') : 'Nothing to undo';
+      }
+      if (r) {
+        r.disabled = !state.future.length;
+        // Feature 5: tooltip listing next 5 redo labels
+        const redoLabels = state.future.slice(-5).reverse().map((s, i) => `${i + 1}. ${s.label || 'change'}`);
+        r.title = redoLabels.length ? 'Redo:\n' + redoLabels.join('\n') : 'Nothing to redo';
+      }
     };
 
     // ---------- Storage: load/save ----------
@@ -555,6 +577,23 @@ window.CanvasLevelEditor = (() => {
         }
       });
 
+      // Feature 2: Draw yellow note indicator dots for obstacles with _note
+      L.obstacles.forEach((o, i) => {
+        if (!o._note) return;
+        if (state.hiddenTypes.has(o.type)) return;
+        const nx = (o.x ?? (o.x1 != null ? (o.x1 + o.x2) / 2 : 0)) + LEFT_PAD;
+        const ny = (o.y ?? GY) - 20;
+        ctx.save();
+        ctx.fillStyle = '#f1c40f';
+        ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(nx + 14, ny - 6, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      });
+
       // Ball start
       const bx = L.ballStart.x + LEFT_PAD;
       const by = L.ballStart.y;
@@ -616,30 +655,76 @@ window.CanvasLevelEditor = (() => {
         ctx.restore();
       }
 
-      // Ruler overlay
-      if (state.showRuler) {
+      // World width resize handle — orange strip at right edge of world
+      {
+        const hx = L.worldW + LEFT_PAD;
         ctx.save();
-        const ranges = [325, 400, 485, 570];
-        const tierLabels = ['T1', 'T2', 'T3', 'T4'];
-        ctx.strokeStyle = 'rgba(255,87,51,0.45)';
-        ctx.setLineDash([6, 4]);
+        ctx.shadowColor = 'transparent';
+        ctx.fillStyle = state._worldResizeHover ? 'rgba(255,180,0,0.7)' : 'rgba(255,140,0,0.35)';
+        ctx.fillRect(hx - 4, 0, 8, CANVAS_H);
+        ctx.strokeStyle = state._worldResizeHover ? '#ff8c00' : 'rgba(255,140,0,0.6)';
         ctx.lineWidth = 1;
-        ranges.forEach((r, i) => {
+        ctx.beginPath(); ctx.moveTo(hx, 0); ctx.lineTo(hx, CANVAS_H); ctx.stroke();
+        // Arrows hint
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.font = 'bold 11px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('↔', hx, CANVAS_H / 2);
+        ctx.restore();
+      }
+
+      // Ruler overlay — tick marks along top and left edges
+      if (state.showRuler) {
+        const RULER_W = 20; // ruler strip width in world px
+        ctx.save();
+        ctx.shadowColor = 'transparent';
+        const worldW = L.worldW + LEFT_PAD * 2;
+
+        // Top ruler background
+        ctx.fillStyle = 'rgba(20,20,20,0.65)';
+        ctx.fillRect(0, 0, worldW, RULER_W);
+
+        // Left ruler background
+        ctx.fillStyle = 'rgba(20,20,20,0.65)';
+        ctx.fillRect(0, 0, RULER_W, CANVAS_H);
+
+        ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.lineWidth = 1;
+
+        // Top ruler ticks — every 50 world px
+        for (let wx = 0; wx <= L.worldW; wx += 50) {
+          const cx = wx + LEFT_PAD; // canvas x
+          const isMajor = wx % 100 === 0;
+          const tickH = isMajor ? RULER_W - 4 : RULER_W / 2;
           ctx.beginPath();
-          ctx.arc(bx, by, r, -Math.PI, 0);
+          ctx.moveTo(cx, RULER_W - tickH);
+          ctx.lineTo(cx, RULER_W);
           ctx.stroke();
-          ctx.fillStyle = 'rgba(255,87,51,0.85)';
-          ctx.font = '11px sans-serif';
-          ctx.fillText(tierLabels[i], bx + r - 16, by - 6);
-        });
-        ctx.setLineDash([]);
-        ctx.strokeStyle = '#ff5733';
-        ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(hx, hy); ctx.stroke();
-        const dist = Math.round(Math.hypot(hx - bx, hy - by));
-        ctx.fillStyle = '#ff5733';
-        ctx.font = 'bold 13px sans-serif';
-        ctx.fillText(`${dist}px`, (bx + hx) / 2, (by + hy) / 2 - 10);
+          if (isMajor && wx > 0) {
+            ctx.fillText(String(wx), cx + 2, RULER_W - 2);
+          }
+        }
+
+        // Left ruler ticks — every 50 world px vertically
+        ctx.textAlign = 'right';
+        for (let wy = 0; wy <= CANVAS_H; wy += 50) {
+          const isMajor = wy % 100 === 0;
+          const tickW = isMajor ? RULER_W - 4 : RULER_W / 2;
+          ctx.beginPath();
+          ctx.moveTo(RULER_W - tickW, wy);
+          ctx.lineTo(RULER_W, wy);
+          ctx.stroke();
+          if (isMajor && wy > 0) {
+            ctx.save();
+            ctx.translate(RULER_W - 2, wy - 2);
+            ctx.rotate(-Math.PI / 2);
+            ctx.fillText(String(wy), 0, 0);
+            ctx.restore();
+          }
+        }
         ctx.restore();
       }
     };
@@ -874,10 +959,64 @@ window.CanvasLevelEditor = (() => {
       } else if (state.sortMode === 'slot') {
         entries = entries.slice().sort((a, b) => (a.lvl.slot ?? 9999) - (b.lvl.slot ?? 9999));
       }
+      // Drag-and-drop state for level reorder
+      let _dragSrcIdx = null;
+
       entries.forEach(({ lvl, idx }) => {
         const li = document.createElement('li');
         const isActive = idx === state.currentIdx;
         li.className = 'level-item' + (isActive ? ' active' : '');
+        li.draggable = true;
+        li.dataset.levelIdx = idx;
+        li.addEventListener('dragstart', (e) => {
+          _dragSrcIdx = idx;
+          li.classList.add('level-drag-source');
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', String(idx));
+        });
+        li.addEventListener('dragend', () => {
+          li.classList.remove('level-drag-source');
+          ul.querySelectorAll('.level-drop-indicator').forEach(el => el.remove());
+          ul.querySelectorAll('.level-drag-over').forEach(el => el.classList.remove('level-drag-over'));
+        });
+        li.addEventListener('dragover', (e) => {
+          if (_dragSrcIdx == null || _dragSrcIdx === idx) return;
+          e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+          ul.querySelectorAll('.level-drop-indicator').forEach(el => el.remove());
+          ul.querySelectorAll('.level-drag-over').forEach(el => el.classList.remove('level-drag-over'));
+          li.classList.add('level-drag-over');
+          const indicator = document.createElement('div');
+          indicator.className = 'level-drop-indicator';
+          const rect = li.getBoundingClientRect();
+          const midY = rect.top + rect.height / 2;
+          if (e.clientY < midY) li.parentElement.insertBefore(indicator, li);
+          else li.parentElement.insertBefore(indicator, li.nextSibling);
+        });
+        li.addEventListener('dragleave', () => {
+          li.classList.remove('level-drag-over');
+        });
+        li.addEventListener('drop', (e) => {
+          e.preventDefault();
+          if (_dragSrcIdx == null || _dragSrcIdx === idx) return;
+          const from = _dragSrcIdx;
+          // Determine insert position: before or after target
+          const rect = li.getBoundingClientRect();
+          const midY = rect.top + rect.height / 2;
+          let to = idx;
+          if (e.clientY >= midY && to < state.levels.length - 1) to = idx + (from < idx ? 0 : 1);
+          else if (e.clientY < midY) to = idx + (from < idx ? -1 : 0);
+          to = Math.max(0, Math.min(state.levels.length - 1, to));
+          if (from === to) return;
+          pushHistory(true, 'Reorder levels');
+          const moved = state.levels.splice(from, 1)[0];
+          state.levels.splice(to, 0, moved);
+          // Follow the current level
+          if (state.currentIdx === from) state.currentIdx = to;
+          else if (state.currentIdx > from && state.currentIdx <= to) state.currentIdx--;
+          else if (state.currentIdx < from && state.currentIdx >= to) state.currentIdx++;
+          saveSettings();
+          render();
+        });
         if (isActive) {
           setTimeout(() => li.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), 50);
         }
@@ -908,7 +1047,8 @@ window.CanvasLevelEditor = (() => {
             tc.fillRect(Math.max(0, Math.min(15, px)), Math.max(0, Math.min(9, py)), 2, 2);
           });
         } catch (_) {}
-        li.innerHTML = `<span class="${chipCls}">${courtTag}</span><span class="name">${name}</span>${playBtn}`;
+        const obsCount = (lvl.data.obstacles || []).length;
+        li.innerHTML = `<span class="${chipCls}">${courtTag}</span><span class="name">${name}</span>${playBtn}<span class="level-stats">${obsCount} obstacle${obsCount === 1 ? '' : 's'}</span>`;
         li.insertBefore(thumb, li.firstChild);
         li.title = name;
         li.addEventListener('click', (e) => {
@@ -1072,6 +1212,30 @@ window.CanvasLevelEditor = (() => {
           ? `${course.name} — ${list.length} asset${list.length === 1 ? '' : 's'}`
           : 'All assets (no course assigned)';
       }
+      // Palette filter — ensure filter input exists
+      let filterWrap = $('palette-filter-wrap');
+      if (!filterWrap) {
+        filterWrap = document.createElement('div');
+        filterWrap.id = 'palette-filter-wrap';
+        filterWrap.style.cssText = 'display:flex;align-items:center;gap:4px;margin-bottom:4px;';
+        const inp = document.createElement('input');
+        inp.id = 'palette-filter';
+        inp.type = 'search';
+        inp.placeholder = 'Filter assets…';
+        inp.style.cssText = 'flex:1;min-width:0;font-size:11px;padding:2px 4px;';
+        filterWrap.appendChild(inp);
+        const clrBtn = document.createElement('button');
+        clrBtn.textContent = '×';
+        clrBtn.className = 'btn btn-mini';
+        clrBtn.title = 'Clear filter';
+        clrBtn.style.cssText = 'padding:1px 5px;line-height:1;';
+        clrBtn.addEventListener('click', () => { inp.value = ''; renderPalette(); });
+        filterWrap.appendChild(clrBtn);
+        inp.addEventListener('input', () => renderPalette());
+        // Insert before grid
+        grid.parentElement.insertBefore(filterWrap, grid);
+      }
+      const filterVal = ($('palette-filter')?.value || '').toLowerCase();
       const recentWrap = $('asset-recent');
       if (recentWrap) {
         recentWrap.innerHTML = '';
@@ -1090,6 +1254,7 @@ window.CanvasLevelEditor = (() => {
       const currentObstacles = state.levels[state.currentIdx]?.data?.obstacles || [];
       list.forEach(type => {
         if (!SCHEMA[type]) return;
+        if (filterVal && !type.toLowerCase().includes(filterVal)) return;
         const btn = makeAssetButton(type);
         const count = currentObstacles.filter(o => o.type === type).length;
         if (count > 0) {
@@ -1262,6 +1427,64 @@ window.CanvasLevelEditor = (() => {
       toast(`Distributed ${sorted.length}`);
     };
 
+    // ---------- Alignment helpers ----------
+    const _getObsLeft  = (o) => o.x1 != null ? o.x1 : (o.x != null ? o.x : 0);
+    const _getObsRight = (o) => o.x2 != null ? o.x2 : (o.x != null ? o.x : 0);
+    const _getObsTop   = (o) => o.y != null ? o.y - (o.h != null ? o.h / 2 : 0) : GY;
+    const _getObsBottom= (o) => o.y != null ? o.y + (o.h != null ? o.h / 2 : 0) : GY;
+    const _getObsCenterH = (o) => o.x1 != null ? (o.x1 + o.x2) / 2 : (o.x != null ? o.x : 0);
+    const _getObsCenterV = (o) => o.y != null ? o.y : GY;
+
+    const alignSelected = (mode) => {
+      const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+      const ids = state.selectedObsList.filter(i => i >= 0 && i < lvl.data.obstacles.length);
+      if (ids.length < 2) { toast('Select 2+ obstacles to align'); return; }
+      pushHistory(true, 'Align ' + mode);
+      const obs = ids.map(i => lvl.data.obstacles[i]);
+      if (mode === 'left') {
+        const minL = Math.min(...obs.map(_getObsLeft));
+        ids.forEach(i => {
+          const o = lvl.data.obstacles[i];
+          if (o.x1 != null) { const w = o.x2 - o.x1; o.x1 = minL; o.x2 = minL + w; }
+          else if (o.x != null) o.x = minL;
+        });
+      } else if (mode === 'right') {
+        const maxR = Math.max(...obs.map(_getObsRight));
+        ids.forEach(i => {
+          const o = lvl.data.obstacles[i];
+          if (o.x1 != null) { const w = o.x2 - o.x1; o.x2 = maxR; o.x1 = maxR - w; }
+          else if (o.x != null) o.x = maxR;
+        });
+      } else if (mode === 'top') {
+        const minT = Math.min(...obs.map(_getObsTop));
+        ids.forEach(i => {
+          const o = lvl.data.obstacles[i];
+          if (o.y != null) { const h = o.h != null ? o.h : 0; o.y = minT + h / 2; }
+        });
+      } else if (mode === 'bottom') {
+        const maxB = Math.max(...obs.map(_getObsBottom));
+        ids.forEach(i => {
+          const o = lvl.data.obstacles[i];
+          if (o.y != null) { const h = o.h != null ? o.h : 0; o.y = maxB - h / 2; }
+        });
+      } else if (mode === 'centerH') {
+        const avgC = obs.reduce((s, o) => s + _getObsCenterH(o), 0) / obs.length;
+        ids.forEach(i => {
+          const o = lvl.data.obstacles[i];
+          if (o.x1 != null) { const w = o.x2 - o.x1; o.x1 = avgC - w / 2; o.x2 = avgC + w / 2; }
+          else if (o.x != null) o.x = avgC;
+        });
+      } else if (mode === 'centerV') {
+        const avgC = obs.reduce((s, o) => s + _getObsCenterV(o), 0) / obs.length;
+        ids.forEach(i => {
+          const o = lvl.data.obstacles[i];
+          if (o.y != null) o.y = avgC;
+        });
+      }
+      render();
+      toast(`Aligned ${ids.length} (${mode})`);
+    };
+
     const renderProps = () => {
       const body = $('props-body');
       const info = $('selected-info');
@@ -1357,6 +1580,8 @@ window.CanvasLevelEditor = (() => {
           html += `<div class="form-row"><label>${f}</label><input type="text" data-field="${f}" value="${v ?? ''}"></div>`;
         }
       });
+      // Feature 2: Note textarea
+      html += `<div class="form-row" style="flex-direction:column;align-items:flex-start;gap:3px"><label style="margin-bottom:2px">Note</label><textarea id="prop-note" style="width:100%;box-sizing:border-box;min-height:52px;font-size:11px;resize:vertical" placeholder="Optional note…">${o._note || ''}</textarea></div>`;
       if (body) {
         body.innerHTML = html;
         body.querySelectorAll('[data-field]').forEach(inp => {
@@ -1370,6 +1595,16 @@ window.CanvasLevelEditor = (() => {
             render();
           });
         });
+        // Feature 2: Note textarea handler
+        const noteEl = $('prop-note');
+        if (noteEl) {
+          noteEl.addEventListener('input', () => {
+            const val = noteEl.value;
+            if (val) o._note = val;
+            else delete o._note;
+            scheduleRender();
+          });
+        }
         $('prop-delete').addEventListener('click', deleteSelected);
         $('act-snap-ground').addEventListener('click', () => {
           pushHistory(true); snapToGround(o); render(); toast('Snapped to ground');
@@ -1426,6 +1661,7 @@ window.CanvasLevelEditor = (() => {
         }
       }
       lvl.data.obstacles.push(o);
+      _flashObsCount('add');
       if (config.onObstaclePlace) { try { config.onObstaclePlace(cloneDeep(o), lvl); } catch(_){} }
       if (lvl.data.obstacles.length > 50) {
         toast('⚠ Level has ' + lvl.data.obstacles.length + ' obstacles — may impact performance', 4000);
@@ -1446,6 +1682,7 @@ window.CanvasLevelEditor = (() => {
       const deleted = ids.map(i => cloneDeep(lvl.data.obstacles[i]));
       pushHistory(true, 'Delete');
       ids.forEach(i => lvl.data.obstacles.splice(i, 1));
+      _flashObsCount('remove');
       if (config.onObstacleDelete) { try { config.onObstacleDelete(deleted, lvl); } catch(_){} }
       state.selectedObs = -1;
       state.selectedObsList = [];
@@ -1501,9 +1738,44 @@ window.CanvasLevelEditor = (() => {
     const panState = { spaceDown: false, dragging: false, startX: 0, startY: 0, scrollL: 0, scrollT: 0 };
     const wrapEl = () => document.getElementById('canvas-wrap');
 
+    // Helper: is point near world-resize handle?
+    const nearWorldResizeHandle = (p) => {
+      const lvl = state.levels[state.currentIdx]; if (!lvl) return false;
+      const hx = lvl.data.worldW + LEFT_PAD;
+      return Math.abs(p.x - hx) <= 6;
+    };
+
+    canvas.addEventListener('mousemove', (e) => {
+      if (state._worldResizeDrag) {
+        const p = canvasPt(e);
+        const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+        const newW = Math.max(400, Math.min(8000, Math.round(p.x - LEFT_PAD)));
+        lvl.data.worldW = newW;
+        const ww = $('in-worldW'); if (ww) ww.value = newW;
+        const wwd = $('world-width-display'); if (wwd) wwd.textContent = newW;
+        resizeCanvas(); scheduleRender();
+        e.stopPropagation(); return;
+      }
+      const p = canvasPt(e);
+      const hover = nearWorldResizeHandle(p);
+      if (hover !== state._worldResizeHover) {
+        state._worldResizeHover = hover;
+        canvas.style.cursor = hover ? 'ew-resize' : '';
+        scheduleRender();
+      }
+    }, true); // capture phase so it runs before the regular mousemove
+
     canvas.addEventListener('mousedown', (e) => {
       const p = canvasPt(e);
       if (panState.spaceDown) return;
+      // World resize handle
+      if (nearWorldResizeHandle(p) && state.levels[state.currentIdx]) {
+        const lvl = state.levels[state.currentIdx];
+        pushHistory(true, 'Resize world');
+        state._worldResizeDrag = { origW: lvl.data.worldW };
+        canvas.style.cursor = 'ew-resize';
+        e.preventDefault(); e.stopPropagation(); return;
+      }
       if (state.tool === 'eraser') {
         const h = hitTest(p.x, p.y);
         if (h && h.kind === 'obs') {
@@ -1640,6 +1912,11 @@ window.CanvasLevelEditor = (() => {
     });
 
     window.addEventListener('mouseup', () => {
+      if (state._worldResizeDrag) {
+        state._worldResizeDrag = null;
+        canvas.style.cursor = '';
+        markDirty();
+      }
       if (state.drag) { state.smartGuideX = null; }
       state.drag = null;
       if (state.marquee) {
@@ -1735,6 +2012,46 @@ window.CanvasLevelEditor = (() => {
             items.push({ label: ci.label, run: () => { try { ci.run(o, lvl.data); } catch(_){} } });
           });
         }
+        if (state.selectedObsList.length >= 2) {
+          items.push(
+            { sep: true },
+            { label: 'Align Left',     run: () => alignSelected('left') },
+            { label: 'Align Right',    run: () => alignSelected('right') },
+            { label: 'Align Top',      run: () => alignSelected('top') },
+            { label: 'Align Bottom',   run: () => alignSelected('bottom') },
+            { label: 'Center Horiz',   run: () => alignSelected('centerH') },
+            { label: 'Center Vert',    run: () => alignSelected('centerV') }
+          );
+        }
+        // Copy to level option — only when obstacles are selected
+        if (state.selectedObsList.length >= 1 && state.levels.length > 1) {
+          items.push(
+            { sep: true },
+            { label: 'Copy to level…', run: () => {
+                const names = state.levels.map((l, i) => `${i}: ${l.data.name || '(unnamed)'}`).join('\n');
+                const input = prompt(`Copy selected obstacle(s) to level (0-based index):\n${names}`, '');
+                if (input == null) return;
+                const targetIdx = parseInt(input, 10);
+                if (isNaN(targetIdx) || targetIdx < 0 || targetIdx >= state.levels.length) {
+                  toast('Invalid level index'); return;
+                }
+                if (targetIdx === state.currentIdx) { toast('Already in this level'); return; }
+                const target = state.levels[targetIdx];
+                const ids = state.selectedObsList.length ? state.selectedObsList : [state.selectedObs];
+                const copies = ids.filter(i => i >= 0).map(i => cloneDeep(lvl.data.obstacles[i]));
+                if (!copies.length) return;
+                // Push history for target level by temporarily switching and back
+                const prevIdx = state.currentIdx;
+                state.currentIdx = targetIdx;
+                pushHistory(true, 'Copy from level ' + prevIdx);
+                state.currentIdx = prevIdx;
+                copies.forEach(o => target.data.obstacles.push(o));
+                markDirty();
+                toast(`Copied ${copies.length} obstacle(s) to "${target.data.name || '(unnamed)'}"`, 3000);
+              }
+            }
+          );
+        }
         items.push(
           { sep: true },
           { label: 'Delete', danger: true, run: deleteSelected }
@@ -1751,6 +2068,21 @@ window.CanvasLevelEditor = (() => {
           { label: 'Play this level', run: () => playInGame() }
         );
       }
+      // Feature 3: Export current level — always visible when a level is loaded
+      items.push(
+        { sep: true },
+        { label: 'Export this level…', run: () => {
+            const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+            const safeName = (lvl.data.name || 'level').replace(/[^a-z0-9_\-]/gi, '_');
+            const blob = new Blob([JSON.stringify(lvl.data, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = safeName + '.json'; a.click();
+            URL.revokeObjectURL(url);
+            toast('Exported ' + safeName + '.json');
+          }
+        }
+      );
       showContextMenu(e.clientX, e.clientY, items);
     });
     window.addEventListener('click', (e) => {
@@ -1950,8 +2282,33 @@ window.CanvasLevelEditor = (() => {
       const lvl = state.levels[state.currentIdx];
       if (lvl && e.key === 'Home') { e.preventDefault(); scrollTo(lvl.data.ballStart.x, lvl.data.ballStart.y); }
       if (lvl && e.key === 'End')  { e.preventDefault(); scrollTo(lvl.data.hole.x, lvl.data.hole.y); }
-      if (e.key === 'f' || e.key === 'F') { e.preventDefault(); scrollToSelection(); }
+      if (e.key === 'f' || e.key === 'F') { e.preventDefault(); fitCanvas(); render(); toast('Fit to window'); }
       if (e.key === 'p' || e.key === 'P') { e.preventDefault(); playInGame(); }
+      if (e.key === 'r' || e.key === 'R') { e.preventDefault(); state.showRuler = !state.showRuler; const or = $('opt-ruler'); if (or) or.checked = state.showRuler; saveSettings(); render(); toast(state.showRuler ? 'Ruler on' : 'Ruler off'); }
+      if ((e.key === 'h' || e.key === 'H') && !mod) {
+        const lvl = state.levels[state.currentIdx];
+        if (lvl && state.selectedKind === 'obs' && state.selectedObs >= 0) {
+          const o = lvl.data.obstacles[state.selectedObs];
+          if (o) {
+            if (state.hiddenTypes.has(o.type)) state.hiddenTypes.delete(o.type);
+            else state.hiddenTypes.add(o.type);
+            toast(state.hiddenTypes.has(o.type) ? `Hidden: ${o.type}` : `Visible: ${o.type}`);
+            render();
+          }
+        }
+      }
+      if ((e.key === 'l' || e.key === 'L') && !mod) {
+        const lvl = state.levels[state.currentIdx];
+        if (lvl && state.selectedKind === 'obs') {
+          const ids = state.selectedObsList.length ? state.selectedObsList : (state.selectedObs >= 0 ? [state.selectedObs] : []);
+          if (ids.length) {
+            const willLock = !state.lockedObs.has(ids[0]);
+            ids.forEach(i => { if (willLock) state.lockedObs.add(i); else state.lockedObs.delete(i); });
+            toast(willLock ? `Locked ${ids.length}` : `Unlocked ${ids.length}`);
+            render();
+          }
+        }
+      }
       if ((e.key === 'z' || e.key === 'Z') && !mod) {
         e.preventDefault();
         document.body.classList.toggle('is-zen');
@@ -1960,8 +2317,52 @@ window.CanvasLevelEditor = (() => {
       }
     });
 
+    // ---------- Feature 4: Level templates ----------
+    const LEVEL_TEMPLATES = Array.isArray(config.levelTemplates) ? config.levelTemplates : [];
+    const newLevelFromTemplate = (tmpl) => {
+      const base = newLevel();
+      if (tmpl && tmpl.data) {
+        Object.assign(base.data, cloneDeep(tmpl.data));
+        if (!base.data.name) base.data.name = tmpl.name || 'New Level';
+        if (!Array.isArray(base.data.obstacles)) base.data.obstacles = [];
+        if (!base.data.ballStart) base.data.ballStart = { x: 100, y: GY - 30 };
+        if (!base.data.hole) base.data.hole = { x: 700, y: GY };
+      }
+      return base;
+    };
+
+    const showTemplateMenu = (btn) => {
+      const rect = btn.getBoundingClientRect();
+      const items = [
+        { label: '+ Blank level', run: () => {
+            pushHistory(true);
+            state.levels.push(newLevel());
+            state.currentIdx = state.levels.length - 1;
+            saveSettings(); render();
+          }
+        },
+        { sep: true },
+        ...LEVEL_TEMPLATES.map(tmpl => ({
+          label: tmpl.name || 'Template',
+          run: () => {
+            pushHistory(true);
+            state.levels.push(newLevelFromTemplate(tmpl));
+            state.currentIdx = state.levels.length - 1;
+            saveSettings(); render();
+            toast('Created from template: ' + (tmpl.name || ''));
+          }
+        }))
+      ];
+      showContextMenu(rect.left, rect.bottom + 4, items);
+    };
+
     // ---------- Topbar wiring ----------
-    $('btn-new-level').addEventListener('click', () => {
+    $('btn-new-level').addEventListener('click', (e) => {
+      if (LEVEL_TEMPLATES.length > 0) {
+        e.stopPropagation();
+        showTemplateMenu(e.currentTarget);
+        return;
+      }
       pushHistory(true);
       state.levels.push(newLevel());
       state.currentIdx = state.levels.length - 1;
@@ -1970,9 +2371,12 @@ window.CanvasLevelEditor = (() => {
     });
     $('btn-duplicate-level').addEventListener('click', () => {
       const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+      const defaultName = (lvl.data.name || 'level') + ' Copy';
+      const newName = prompt('New level name:', defaultName);
+      if (newName === null) return; // cancelled
       pushHistory(true);
       const copy = cloneDeep(lvl);
-      copy.data.name = (copy.data.name || 'level') + ' (copy)';
+      copy.data.name = newName || defaultName;
       copy.slot = null;
       state.levels.push(copy);
       state.currentIdx = state.levels.length - 1;
@@ -2304,19 +2708,44 @@ window.CanvasLevelEditor = (() => {
           mmCtx.fillRect(cx - xw / 2, cy - yw / 2, xw, yw);
         }
       });
-      mmCtx.fillStyle = '#fff';
-      mmCtx.fillRect((L.ballStart.x + LEFT_PAD) * sx - 2, L.ballStart.y * sy - 2, 4, 4);
+      // Feature 1: Ball position — white dot
+      const ballMX = (L.ballStart.x + LEFT_PAD) * sx;
+      const ballMY = L.ballStart.y * sy;
+      mmCtx.save();
+      mmCtx.fillStyle = '#ffffff';
+      mmCtx.strokeStyle = 'rgba(0,0,0,0.5)';
+      mmCtx.lineWidth = 1;
+      mmCtx.beginPath();
+      mmCtx.arc(ballMX, ballMY, 3, 0, Math.PI * 2);
+      mmCtx.fill(); mmCtx.stroke();
+      mmCtx.restore();
+
+      // Feature 1: Hole position — red dot
+      const holeMX = (L.hole.x + LEFT_PAD) * sx;
+      const holeMY = L.hole.y * sy;
+      mmCtx.save();
       mmCtx.fillStyle = '#d83d3d';
-      mmCtx.fillRect((L.hole.x + LEFT_PAD) * sx - 2, L.hole.y * sy - 6, 4, 6);
+      mmCtx.strokeStyle = 'rgba(0,0,0,0.5)';
+      mmCtx.lineWidth = 1;
+      mmCtx.beginPath();
+      mmCtx.arc(holeMX, holeMY, 3, 0, Math.PI * 2);
+      mmCtx.fill(); mmCtx.stroke();
+      mmCtx.restore();
+
+      // Feature 1: Viewport indicator — yellow rect
       const w = wrapEl();
       if (w) {
         const vx = (w.scrollLeft / state.zoom) * sx;
         const vy = (w.scrollTop / state.zoom) * sy;
         const vw = (w.clientWidth / state.zoom) * sx;
         const vh = (w.clientHeight / state.zoom) * sy;
-        mmCtx.strokeStyle = '#ff5733';
-        mmCtx.lineWidth = 2;
-        mmCtx.strokeRect(vx, vy, Math.min(vw, W), Math.min(vh, H));
+        mmCtx.save();
+        mmCtx.strokeStyle = '#f1c40f';
+        mmCtx.lineWidth = 1.5;
+        mmCtx.setLineDash([3, 2]);
+        mmCtx.strokeRect(vx, vy, Math.min(vw, W - vx), Math.min(vh, H - vy));
+        mmCtx.setLineDash([]);
+        mmCtx.restore();
       }
     };
 
@@ -2573,18 +3002,22 @@ window.CanvasLevelEditor = (() => {
       ['Ctrl+Z', 'Undo'], ['Ctrl+Y', 'Redo'], ['Ctrl+C', 'Copy'],
       ['Ctrl+V', 'Paste'], ['Ctrl+Shift+V', 'Paste at center'],
       ['Ctrl+X', 'Cut'], ['Ctrl+D', 'Duplicate'], ['Ctrl+Shift+D', 'Duplicate below'],
-      ['Ctrl+A', 'Select all'], ['Ctrl+N', 'New level'], ['Ctrl+S', 'Save'],
+      ['Ctrl+A', 'Select all obstacles'], ['Escape', 'Deselect all'],
+      ['Ctrl+N', 'New level'], ['Ctrl+S', 'Save'],
       ['Delete/Backspace', 'Delete selected'],
-      ['Arrow keys', 'Nudge (grid)'], ['Shift+Arrow', 'Nudge (1px)'],
+      ['Arrow keys', 'Nudge (grid size)'], ['Shift+Arrow', 'Nudge (1px)'],
       ['Alt+↑/↓', 'Reorder level'],
       ['Tab/Shift+Tab', 'Cycle obstacles'],
       ['Space+drag', 'Pan canvas'],
       ['1', 'Select tool'], ['2', 'Eraser'], ['3', 'Ball tool'],
-      ['4', 'Hole tool'], ['G', 'Toggle grid'],
+      ['4', 'Hole tool'],
+      ['G', 'Toggle grid'], ['R', 'Toggle ruler'],
+      ['H', 'Toggle hide selected type'], ['L', 'Lock/unlock selected'],
       ['[/]', 'Grid size -/+5'],
       ['Ctrl+=/-', 'Zoom in/out'], ['Ctrl+0', 'Fit to window'],
+      ['F', 'Fit zoom to canvas'],
       ['Ctrl+Home/End', 'First/last level'],
-      ['P', 'Play level'], ['F', 'Focus selection'],
+      ['P', 'Play level'],
       ['Z', 'Zen mode'], ['?', 'Help'],
       ['Home', 'Scroll to ball'], ['End', 'Scroll to hole'],
     ];
@@ -2714,7 +3147,13 @@ window.CanvasLevelEditor = (() => {
         pushHistory(true, 'Update obstacle');
         Object.assign(lvl.data.obstacles[index], fields);
         render(); return true;
-      }
+      },
+      alignLeft()    { alignSelected('left'); },
+      alignRight()   { alignSelected('right'); },
+      alignTop()     { alignSelected('top'); },
+      alignBottom()  { alignSelected('bottom'); },
+      alignCenterH() { alignSelected('centerH'); },
+      alignCenterV() { alignSelected('centerV'); }
     };
   }; // end create()
 
