@@ -1178,6 +1178,121 @@ select:focus {
 }
 *::-webkit-scrollbar-thumb:hover { background: #546180; }
 
+/* ============ COMMAND PALETTE (Cmd+K / Ctrl+K) ============ */
+#cmd-palette-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 3000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+}
+.cmd-palette {
+  width: 560px;
+  max-width: 90vw;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.65);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  max-height: 70vh;
+}
+.cmd-palette-input {
+  width: 100%;
+  padding: 12px 14px;
+  font-size: 14px;
+  background: var(--bg-alt);
+  color: var(--ink);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  font-family: inherit;
+  outline: none;
+}
+.cmd-palette-list {
+  overflow-y: auto;
+  padding: 4px 0;
+  flex: 1;
+}
+.cmd-palette-cat {
+  padding: 6px 14px 2px;
+  font-size: 10px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+.cmd-palette-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--ink);
+}
+.cmd-palette-item.is-selected,
+.cmd-palette-item:hover {
+  background: var(--panel-alt);
+}
+.cmd-palette-item.is-selected {
+  border-left: 2px solid var(--accent);
+  padding-left: 12px;
+}
+.cmd-palette-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cmd-palette-hint {
+  margin-left: 12px;
+  padding: 1px 6px;
+  font-family: 'SF Mono', Consolas, monospace;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+.cmd-palette-empty {
+  padding: 18px 14px;
+  text-align: center;
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+/* ============ ALIGN/DISTRIBUTE TOOLBAR ============ */
+.align-toolbar .btn {
+  min-width: 26px;
+  padding: 3px 6px;
+}
+
+/* ============ MINIMAP — bottom-right floating ============ */
+#minimap-wrap {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  width: 220px;
+  background: rgba(26, 31, 46, 0.92);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px;
+  z-index: 5;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  pointer-events: auto;
+}
+#minimap-wrap #minimap {
+  width: 100%;
+  height: 80px;
+  display: block;
+  cursor: crosshair;
+  image-rendering: pixelated;
+  max-width: 100%;
+}
+
 @media (max-width: 1200px) {
   #workspace {
     grid-template-columns: 220px 1fr 250px;

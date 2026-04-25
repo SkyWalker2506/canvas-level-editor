@@ -132,7 +132,8 @@ window.CanvasLevelEditor = (() => {
       _lastClipboardKey: null,
       _savedSnapshot: null,
       pendingPrefab: null,
-      pendingPrefabX: 0
+      pendingPrefabX: 0,
+      commands: []
     };
 
     // ---------- Event system ----------
@@ -3732,6 +3733,293 @@ window.CanvasLevelEditor = (() => {
       }
     } catch (_) {}
 
+    // ---------- Command Palette (Cmd+K / Ctrl+K) ----------
+    const registerCommand = (cmd) => {
+      if (!cmd || !cmd.label || typeof cmd.run !== 'function') return;
+      state.commands.push({ category: cmd.category || 'Actions', label: cmd.label, hint: cmd.hint || '', run: cmd.run });
+    };
+    const _builtInCommands = () => {
+      const cmds = [
+        { category: 'Actions', label: 'New Level',           hint: 'Ctrl+N',       run: () => $('btn-new-level')?.click() },
+        { category: 'Actions', label: 'Duplicate Level',                            run: () => $('btn-duplicate-level')?.click() },
+        { category: 'Actions', label: 'Delete Level',                               run: () => $('btn-delete-level')?.click() },
+        { category: 'Actions', label: 'Undo',                hint: 'Ctrl+Z',       run: () => $('btn-undo')?.click() },
+        { category: 'Actions', label: 'Redo',                hint: 'Ctrl+Y',       run: () => $('btn-redo')?.click() },
+        { category: 'Actions', label: 'Save',                hint: 'Ctrl+S',       run: () => $('btn-save')?.click() },
+        { category: 'Actions', label: 'Export Levels (JSON)',                      run: () => $('btn-export')?.click() },
+        { category: 'Actions', label: 'Import Levels (JSON)',                      run: () => $('btn-import')?.click() },
+        { category: 'Actions', label: 'Export PNG Image',                          run: () => exportPNG() },
+        { category: 'Actions', label: 'Share Link',                                run: () => shareLink() },
+        { category: 'Actions', label: 'Zoom In',             hint: 'Ctrl++',       run: () => $('btn-zoom-in')?.click() },
+        { category: 'Actions', label: 'Zoom Out',            hint: 'Ctrl+-',       run: () => $('btn-zoom-out')?.click() },
+        { category: 'Actions', label: 'Zoom Fit',            hint: 'F',            run: () => $('btn-zoom-fit')?.click() },
+        { category: 'Actions', label: 'Play Level',          hint: 'P',            run: () => playInGame() },
+        { category: 'Actions', label: 'Show Help',           hint: '?',            run: () => { const h = $('help-overlay'); if (h) h.style.display = ''; } },
+        { category: 'Actions', label: 'Toggle Grid',         hint: 'G',            run: () => { state.showGrid = !state.showGrid; const og = $('opt-grid'); if (og) og.checked = state.showGrid; saveSettings(); render(); } },
+        { category: 'Actions', label: 'Toggle Ruler',        hint: 'R',            run: () => { state.showRuler = !state.showRuler; const or = $('opt-ruler'); if (or) or.checked = state.showRuler; saveSettings(); render(); } },
+        { category: 'Actions', label: 'Select All Obstacles', hint: 'Ctrl+A',      run: () => { const lvl = state.levels[state.currentIdx]; if (!lvl?.data.obstacles.length) return; state.selectedKind = 'obs'; state.selectedObsList = lvl.data.obstacles.map((_, i) => i); state.selectedObs = state.selectedObsList[state.selectedObsList.length - 1]; render(); } },
+        { category: 'Actions', label: 'Align Left',          hint: 'Ctrl+Shift+L', run: () => alignSelected('left') },
+        { category: 'Actions', label: 'Align Right',                               run: () => alignSelected('right') },
+        { category: 'Actions', label: 'Align Top',                                 run: () => alignSelected('top') },
+        { category: 'Actions', label: 'Align Bottom',                              run: () => alignSelected('bottom') },
+        { category: 'Actions', label: 'Center Horizontally',                       run: () => alignSelected('centerH') },
+        { category: 'Actions', label: 'Center Vertically',                         run: () => alignSelected('centerV') },
+        { category: 'Actions', label: 'Distribute Horizontally',                   run: () => bulkDistribute() }
+      ];
+      // Prefabs
+      const allPrefabs = [...BUILTIN_PREFABS, ...state.userPrefabs];
+      allPrefabs.forEach(p => {
+        cmds.push({ category: 'Prefabs', label: p.name, hint: p.desc || '', run: () => insertPrefab(p) });
+      });
+      // Courses — jump to course filter
+      Object.keys(COURSES).forEach(cid => {
+        const c = COURSES[cid];
+        cmds.push({
+          category: 'Courses',
+          label: 'Jump to course: ' + (c.name || COURSE_NAMES[cid] || ('Course ' + cid)),
+          run: () => {
+            const f = $('filter-court');
+            if (f) { f.value = String(cid); f.dispatchEvent(new Event('change')); }
+          }
+        });
+      });
+      // Levels — jump to level
+      state.levels.forEach((lvl, idx) => {
+        const name = lvl.data?.name || ('Level ' + (idx + 1));
+        const slot = lvl.courtId && lvl.slot ? ` (C${lvl.courtId} S${lvl.slot})` : '';
+        cmds.push({ category: 'Levels', label: 'Open: ' + name + slot, run: () => selectLevel(idx) });
+      });
+      return cmds;
+    };
+    let _cmdPaletteEl = null;
+    let _cmdPaletteIndex = 0;
+    let _cmdPaletteFiltered = [];
+    const _renderCmdPaletteList = (q) => {
+      if (!_cmdPaletteEl) return;
+      const all = [..._builtInCommands(), ...state.commands];
+      const ql = (q || '').toLowerCase().trim();
+      _cmdPaletteFiltered = ql
+        ? all.filter(c => (c.label + ' ' + c.category + ' ' + (c.hint || '')).toLowerCase().includes(ql))
+        : all;
+      const listEl = _cmdPaletteEl.querySelector('.cmd-palette-list');
+      if (!listEl) return;
+      // Group by category
+      const groups = {};
+      _cmdPaletteFiltered.forEach((c, i) => {
+        (groups[c.category] = groups[c.category] || []).push({ c, i });
+      });
+      let html = '';
+      const order = ['Actions', 'Prefabs', 'Courses', 'Levels'];
+      const cats = [...order.filter(o => groups[o]), ...Object.keys(groups).filter(k => !order.includes(k))];
+      cats.forEach(cat => {
+        html += `<div class="cmd-palette-cat">${cat}</div>`;
+        groups[cat].forEach(({ c, i }) => {
+          const sel = i === _cmdPaletteIndex ? ' is-selected' : '';
+          html += `<div class="cmd-palette-item${sel}" data-idx="${i}"><span class="cmd-palette-label">${c.label.replace(/</g, '&lt;')}</span>${c.hint ? `<span class="cmd-palette-hint">${c.hint}</span>` : ''}</div>`;
+        });
+      });
+      if (!_cmdPaletteFiltered.length) html = '<div class="cmd-palette-empty">No matches</div>';
+      listEl.innerHTML = html;
+      const selEl = listEl.querySelector('.is-selected');
+      if (selEl) selEl.scrollIntoView({ block: 'nearest' });
+    };
+    const _runCmdPaletteSelected = () => {
+      const cmd = _cmdPaletteFiltered[_cmdPaletteIndex];
+      if (!cmd) return;
+      closeCommandPalette();
+      try { cmd.run(); } catch (e) { console.error('[cmd-palette]', e); }
+    };
+    const closeCommandPalette = () => {
+      if (_cmdPaletteEl) { _cmdPaletteEl.remove(); _cmdPaletteEl = null; }
+    };
+    const openCommandPalette = () => {
+      if (_cmdPaletteEl) return;
+      _cmdPaletteIndex = 0;
+      const overlay = document.createElement('div');
+      overlay.id = 'cmd-palette-overlay';
+      overlay.innerHTML =
+        '<div class="cmd-palette">' +
+          '<input class="cmd-palette-input" type="text" placeholder="Type a command, prefab, course, or level…" autocomplete="off">' +
+          '<div class="cmd-palette-list"></div>' +
+        '</div>';
+      document.body.appendChild(overlay);
+      _cmdPaletteEl = overlay;
+      const inp = overlay.querySelector('.cmd-palette-input');
+      const listEl = overlay.querySelector('.cmd-palette-list');
+      _renderCmdPaletteList('');
+      inp.focus();
+      inp.addEventListener('input', () => { _cmdPaletteIndex = 0; _renderCmdPaletteList(inp.value); });
+      inp.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowDown') { e.preventDefault(); _cmdPaletteIndex = Math.min(_cmdPaletteFiltered.length - 1, _cmdPaletteIndex + 1); _renderCmdPaletteList(inp.value); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); _cmdPaletteIndex = Math.max(0, _cmdPaletteIndex - 1); _renderCmdPaletteList(inp.value); }
+        else if (e.key === 'Enter') { e.preventDefault(); _runCmdPaletteSelected(); }
+        else if (e.key === 'Escape') { e.preventDefault(); closeCommandPalette(); }
+      });
+      listEl.addEventListener('click', (e) => {
+        const item = e.target.closest('.cmd-palette-item');
+        if (!item) return;
+        _cmdPaletteIndex = parseInt(item.getAttribute('data-idx'), 10) || 0;
+        _runCmdPaletteSelected();
+      });
+      overlay.addEventListener('mousedown', (e) => {
+        if (e.target === overlay) closeCommandPalette();
+      });
+    };
+    window.addEventListener('keydown', (e) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        if (_cmdPaletteEl) closeCommandPalette(); else openCommandPalette();
+      }
+    });
+    $('btn-cmd-palette')?.addEventListener('click', openCommandPalette);
+
+    // ---------- PNG Image Export ----------
+    const exportPNG = () => {
+      const lvl = state.levels[state.currentIdx];
+      if (!lvl) { toast('No level to export'); return; }
+      const L = lvl.data;
+      const W = L.worldW + LEFT_PAD * 2;
+      const H = CANVAS_H;
+      const off = document.createElement('canvas');
+      off.width = W; off.height = H;
+      const offCtx = off.getContext('2d');
+      // Save state to suppress UI overlays
+      const _grid = state.showGrid, _ruler = state.showRuler, _ovl = state.showOverlaps;
+      const _selKind = state.selectedKind, _selObs = state.selectedObs, _selList = state.selectedObsList.slice();
+      const _drag = state.drag, _marquee = state.marquee, _smartG = state.smartGuideX, _snapG = state.snapGuideLines;
+      const _zoom = state.zoom, _w = canvas.width, _h = canvas.height;
+      try {
+        state.showGrid = false; state.showRuler = false; state.showOverlaps = false;
+        state.selectedKind = null; state.selectedObs = -1; state.selectedObsList = [];
+        state.drag = null; state.marquee = null; state.smartGuideX = null; state.snapGuideLines = null;
+        state.zoom = 1;
+        canvas.width = W; canvas.height = H;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        renderCanvas();
+        offCtx.drawImage(canvas, 0, 0);
+      } finally {
+        state.showGrid = _grid; state.showRuler = _ruler; state.showOverlaps = _ovl;
+        state.selectedKind = _selKind; state.selectedObs = _selObs; state.selectedObsList = _selList;
+        state.drag = _drag; state.marquee = _marquee; state.smartGuideX = _smartG; state.snapGuideLines = _snapG;
+        state.zoom = _zoom; canvas.width = _w; canvas.height = _h;
+        resizeCanvas(); renderCanvas();
+      }
+      off.toBlob((blob) => {
+        if (!blob) { toast('PNG export failed'); return; }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        a.href = url; a.download = `level-${state.currentIdx}-${ts}.png`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        toast('PNG exported');
+      }, 'image/png');
+    };
+    $('btn-export-png')?.addEventListener('click', exportPNG);
+
+    // ---------- Shareable URL ----------
+    const shareLink = () => {
+      const lvl = state.levels[state.currentIdx];
+      if (!lvl) { toast('No level to share'); return; }
+      try {
+        const json = JSON.stringify({ courtId: lvl.courtId, slot: lvl.slot, data: lvl.data });
+        // base64 encode (UTF-8 safe via TextEncoder)
+        const bytes = new TextEncoder().encode(json);
+        let bin = '';
+        bytes.forEach(b => bin += String.fromCharCode(b));
+        const b64 = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        const url = `${location.origin}${location.pathname}#level=${b64}`;
+        history.replaceState(null, '', '#level=' + b64);
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(url).then(
+            () => toast('Share link copied to clipboard'),
+            () => toast('Link set in URL — copy manually')
+          );
+        } else {
+          toast('Link set in URL — copy manually');
+        }
+      } catch (e) {
+        toast('Share failed: ' + e.message);
+      }
+    };
+    $('btn-share-link')?.addEventListener('click', shareLink);
+
+    // Decode #level=<base64> from hash on load
+    (() => {
+      try {
+        const h = (location.hash || '').replace(/^#/, '');
+        if (!h) return;
+        const params = new URLSearchParams(h);
+        const lvlB64 = params.get('level');
+        if (!lvlB64) return;
+        const b64 = lvlB64.replace(/-/g, '+').replace(/_/g, '/');
+        const pad = b64.length % 4 ? '='.repeat(4 - (b64.length % 4)) : '';
+        const bin = atob(b64 + pad);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const json = new TextDecoder().decode(bytes);
+        const decoded = JSON.parse(json);
+        const data = decoded.data || decoded;
+        const courtId = decoded.courtId != null ? decoded.courtId : null;
+        if (!data || !Array.isArray(data.obstacles)) return;
+        const proceed = (state.levels.length === 0) ||
+          confirm('Import shared level from URL? This will be added to your level list.');
+        if (!proceed) return;
+        pushHistory(true, 'Import shared link');
+        state.levels.push({ courtId, slot: null, data: cloneDeep(data) });
+        state.currentIdx = state.levels.length - 1;
+        toast('Imported level from link');
+        render();
+      } catch (e) { console.warn('[share-link] decode failed', e); }
+    })();
+
+    // ---------- Align/Distribute toolbar (renderProps hook via mutation observer) ----------
+    const _alignToolbarHTML = () =>
+      '<div class="align-toolbar" id="align-toolbar" style="display:flex;flex-wrap:wrap;gap:3px;margin:6px 0;padding:6px;border:1px solid var(--border);border-radius:4px;background:var(--panel-alt)">' +
+        '<strong style="width:100%;font-size:11px;margin-bottom:2px">Align / Distribute</strong>' +
+        '<button class="btn btn-mini" data-align="left"   title="Align left (Ctrl+Shift+L)">⇤</button>' +
+        '<button class="btn btn-mini" data-align="centerH" title="Center horizontally">↔</button>' +
+        '<button class="btn btn-mini" data-align="right"  title="Align right">⇥</button>' +
+        '<button class="btn btn-mini" data-align="top"    title="Align top">⇡</button>' +
+        '<button class="btn btn-mini" data-align="centerV" title="Center vertically">↕</button>' +
+        '<button class="btn btn-mini" data-align="bottom" title="Align bottom">⇣</button>' +
+        '<button class="btn btn-mini" data-distribute="x"  title="Distribute horizontally">⇿</button>' +
+      '</div>';
+    const _injectAlignToolbar = () => {
+      const body = $('props-body'); if (!body) return;
+      if (state.selectedKind !== 'obs' || state.selectedObsList.length < 2) {
+        body.querySelector('#align-toolbar')?.remove();
+        return;
+      }
+      if (body.querySelector('#align-toolbar')) return;
+      const wrap = document.createElement('div');
+      wrap.innerHTML = _alignToolbarHTML();
+      body.insertBefore(wrap.firstChild, body.firstChild);
+      body.querySelectorAll('#align-toolbar [data-align]').forEach(btn => {
+        btn.addEventListener('click', () => alignSelected(btn.getAttribute('data-align')));
+      });
+      body.querySelectorAll('#align-toolbar [data-distribute]').forEach(btn => {
+        btn.addEventListener('click', () => bulkDistribute());
+      });
+    };
+    // Observe props-body for re-render
+    const _propsBody = $('props-body');
+    if (_propsBody) {
+      const mo = new MutationObserver(() => _injectAlignToolbar());
+      mo.observe(_propsBody, { childList: true });
+      _injectAlignToolbar();
+    }
+    // Keyboard shortcut: Ctrl+Shift+L = align left
+    window.addEventListener('keydown', (e) => {
+      const mod = e.metaKey || e.ctrlKey;
+      const inField = e.target.matches('input, textarea, select');
+      if (!inField && mod && e.shiftKey && (e.key === 'l' || e.key === 'L')) {
+        e.preventDefault();
+        if (state.selectedObsList.length >= 2) alignSelected('left');
+      }
+    });
+
     // ---------- Beforeunload dirty guard ----------
     window.addEventListener('beforeunload', (e) => {
       if (_isDirty) { e.preventDefault(); e.returnValue = ''; }
@@ -3845,7 +4133,11 @@ window.CanvasLevelEditor = (() => {
         const minZ = Math.min(0, ...lvl.data.obstacles.map(x => x._z || 0));
         o._z = minZ - 1; render();
       },
-      restoreBackup
+      restoreBackup,
+      registerCommand,
+      openCommandPalette,
+      exportPNG,
+      shareLink
     };
   }; // end create()
 
