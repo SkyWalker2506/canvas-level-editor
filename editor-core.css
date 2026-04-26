@@ -1293,6 +1293,83 @@ select:focus {
   max-width: 100%;
 }
 
+/* ============ Live validation badge tooltip ============ */
+#validation-tooltip {
+  position: fixed;
+  z-index: 9999;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 11px;
+  max-width: 260px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.55);
+  pointer-events: none;
+  line-height: 1.35;
+}
+#validation-tooltip.v-tip-error  { border-color: var(--danger); }
+#validation-tooltip.v-tip-warn   { border-color: var(--accent); }
+
+.v-toggle { margin: 4px 0 8px; }
+
+/* ============ Onboarding tour overlay ============ */
+#onboarding-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  pointer-events: none;
+}
+#onboarding-overlay::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  pointer-events: auto;
+}
+#onboarding-overlay .onboard-spot {
+  position: absolute;
+  border: 2px solid var(--accent);
+  border-radius: 8px;
+  box-shadow: 0 0 0 9999px rgba(0,0,0,0.55);
+  transition: all 0.25s ease;
+  pointer-events: none;
+  background: transparent;
+}
+#onboarding-overlay .onboard-card {
+  position: absolute;
+  width: 300px;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  box-shadow: 0 8px 28px rgba(0,0,0,0.6);
+  pointer-events: auto;
+  font-size: 13px;
+}
+#onboarding-overlay .onboard-counter {
+  font-size: 10px;
+  opacity: 0.55;
+  margin-bottom: 4px;
+  letter-spacing: 0.5px;
+}
+#onboarding-overlay .onboard-title {
+  font-weight: 700;
+  font-size: 14px;
+  margin-bottom: 6px;
+  color: var(--accent);
+}
+#onboarding-overlay .onboard-msg {
+  margin-bottom: 12px;
+  line-height: 1.45;
+}
+#onboarding-overlay .onboard-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 @media (max-width: 1200px) {
   #workspace {
     grid-template-columns: 220px 1fr 250px;

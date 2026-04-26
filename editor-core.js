@@ -133,7 +133,9 @@ window.CanvasLevelEditor = (() => {
       _savedSnapshot: null,
       pendingPrefab: null,
       pendingPrefabX: 0,
-      commands: []
+      commands: [],
+      showValidationBadges: true,
+      _validationBadges: [] // cached per render: {idx, level, msg, cx, cy, r}
     };
 
     // ---------- Event system ----------
@@ -691,6 +693,44 @@ window.CanvasLevelEditor = (() => {
         ctx.restore();
       });
 
+      // ---------- Live validation badges ----------
+      state._validationBadges = [];
+      if (state.showValidationBadges && config.validateLevel) {
+        let issues = [];
+        try {
+          const course = lvl.courtId != null ? COURSES[lvl.courtId] : null;
+          issues = config.validateLevel(lvl, course) || [];
+        } catch (_) {}
+        issues.forEach(iss => {
+          if (iss.obstacleIdx == null) return;
+          const o = L.obstacles[iss.obstacleIdx];
+          if (!o || !o._bbox || state.hiddenTypes.has(o.type)) return;
+          const b = o._bbox;
+          const cx = b[0] + b[2] - 2;
+          const cy = b[1] + 2;
+          const r = 7;
+          const fill = iss.level === 'error' ? '#d83d3d' : '#e8a454';
+          ctx.save();
+          ctx.shadowColor = 'rgba(0,0,0,0.4)';
+          ctx.shadowBlur = 3;
+          ctx.fillStyle = fill;
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(cx, cy, r, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+          ctx.shadowBlur = 0;
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 10px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('!', cx, cy + 0.5);
+          ctx.restore();
+          state._validationBadges.push({ idx: iss.obstacleIdx, level: iss.level, msg: iss.msg, cx, cy, r });
+        });
+      }
+
       // Ball start
       const bx = L.ballStart.x + LEFT_PAD;
       const by = L.ballStart.y;
@@ -874,6 +914,53 @@ window.CanvasLevelEditor = (() => {
       }
     };
 
+    // ---------- Spatial index (uniform grid bucket) ----------
+    const SPATIAL_CELL = 100;
+    const _spatial = { cells: new Map(), levelRef: null, count: 0 };
+    const _spatialKey = (cx, cy) => cx + ',' + cy;
+    const rebuildSpatialIndex = () => {
+      _spatial.cells.clear();
+      const lvl = state.levels[state.currentIdx];
+      _spatial.levelRef = lvl || null;
+      _spatial.count = 0;
+      if (!lvl) return;
+      lvl.data.obstacles.forEach((o, i) => {
+        const b = o._bbox; if (!b) return;
+        const x0 = Math.floor(b[0] / SPATIAL_CELL);
+        const y0 = Math.floor(b[1] / SPATIAL_CELL);
+        const x1 = Math.floor((b[0] + b[2]) / SPATIAL_CELL);
+        const y1 = Math.floor((b[1] + b[3]) / SPATIAL_CELL);
+        for (let cx = x0; cx <= x1; cx++) {
+          for (let cy = y0; cy <= y1; cy++) {
+            const k = _spatialKey(cx, cy);
+            let arr = _spatial.cells.get(k);
+            if (!arr) { arr = []; _spatial.cells.set(k, arr); }
+            arr.push(i);
+          }
+        }
+        _spatial.count++;
+      });
+    };
+    const queryPoint = (x, y) => {
+      const cx = Math.floor(x / SPATIAL_CELL);
+      const cy = Math.floor(y / SPATIAL_CELL);
+      return _spatial.cells.get(_spatialKey(cx, cy)) || [];
+    };
+    const queryRect = (x1, y1, x2, y2) => {
+      const cx0 = Math.floor(Math.min(x1, x2) / SPATIAL_CELL);
+      const cy0 = Math.floor(Math.min(y1, y2) / SPATIAL_CELL);
+      const cx1 = Math.floor(Math.max(x1, x2) / SPATIAL_CELL);
+      const cy1 = Math.floor(Math.max(y1, y2) / SPATIAL_CELL);
+      const seen = new Set();
+      for (let cx = cx0; cx <= cx1; cx++) {
+        for (let cy = cy0; cy <= cy1; cy++) {
+          const arr = _spatial.cells.get(_spatialKey(cx, cy));
+          if (arr) arr.forEach(i => seen.add(i));
+        }
+      }
+      return Array.from(seen);
+    };
+
     // ---------- Hit test ----------
     const hitTest = (x, y) => {
       const lvl = state.levels[state.currentIdx];
@@ -883,6 +970,21 @@ window.CanvasLevelEditor = (() => {
       if (Math.hypot(x - bx, y - L.ballStart.y) < 18) return { kind: 'ball' };
       const hx = L.hole.x + LEFT_PAD;
       if (x > hx - 20 && x < hx + 20 && y > L.hole.y - 42 && y < L.hole.y + 8) return { kind: 'hole' };
+      // Use spatial index when populated; fall back to linear scan for safety
+      if (_spatial.count > 0 && _spatial.levelRef === lvl) {
+        const candidates = queryPoint(x, y);
+        if (candidates.length) {
+          // Iterate descending to honor draw order (later = on top)
+          candidates.sort((a, b) => b - a);
+          for (const i of candidates) {
+            if (state.lockedObs.has(i)) continue;
+            const b = L.obstacles[i]?._bbox;
+            if (!b) continue;
+            if (x >= b[0] && x <= b[0] + b[2] && y >= b[1] && y <= b[1] + b[3]) return { kind: 'obs', index: i };
+          }
+          return null;
+        }
+      }
       for (let i = L.obstacles.length - 1; i >= 0; i--) {
         if (state.lockedObs.has(i)) continue;
         const b = L.obstacles[i]._bbox;
@@ -1316,25 +1418,36 @@ window.CanvasLevelEditor = (() => {
           summary = `<li class="v-meta v-summary"><strong>Obstacles:</strong> ${summaryItems}</li>`;
         }
       }
+      const badgeToggle = `<li class="v-meta v-toggle">
+        <label style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;font-size:11px">
+          <input type="checkbox" id="opt-validation-badges"${state.showValidationBadges ? ' checked' : ''}>
+          Show badges on canvas
+        </label>
+      </li>`;
       if (!issues.length) {
-        ul.innerHTML = header + '<li class="empty-state">No issues.</li>' + summary;
-        return;
-      }
-      ul.innerHTML = header + issues.map((i, idx) => {
-        const clickable = i.obstacleIdx != null;
-        return `<li class="v-item v-${i.level}${clickable ? ' v-click' : ''}" data-issue="${idx}"><span class="v-dot"></span>${i.msg}</li>`;
-      }).join('') + summary;
-      ul.querySelectorAll('.v-click').forEach(el => {
-        el.addEventListener('click', () => {
-          const issue = issues[parseInt(el.dataset.issue, 10)];
-          if (issue && issue.obstacleIdx != null) {
-            state.selectedKind = 'obs';
-            state.selectedObs = issue.obstacleIdx;
-            state.selectedObsList = [issue.obstacleIdx];
-            scrollToSelection();
-            render();
-          }
+        ul.innerHTML = header + badgeToggle + '<li class="empty-state">No issues.</li>' + summary;
+      } else {
+        ul.innerHTML = header + badgeToggle + issues.map((i, idx) => {
+          const clickable = i.obstacleIdx != null;
+          return `<li class="v-item v-${i.level}${clickable ? ' v-click' : ''}" data-issue="${idx}"><span class="v-dot"></span>${i.msg}</li>`;
+        }).join('') + summary;
+        ul.querySelectorAll('.v-click').forEach(el => {
+          el.addEventListener('click', () => {
+            const issue = issues[parseInt(el.dataset.issue, 10)];
+            if (issue && issue.obstacleIdx != null) {
+              state.selectedKind = 'obs';
+              state.selectedObs = issue.obstacleIdx;
+              state.selectedObsList = [issue.obstacleIdx];
+              scrollToSelection();
+              render();
+            }
+          });
         });
+      }
+      const _bToggle = $('opt-validation-badges');
+      if (_bToggle) _bToggle.addEventListener('change', (e) => {
+        state.showValidationBadges = !!e.target.checked;
+        render();
       });
     };
 
@@ -1540,10 +1653,23 @@ window.CanvasLevelEditor = (() => {
         o.x1 = nx1; o.x2 = nx2;
         if (Number.isFinite(o.crocX)) o.crocX = worldW - o.crocX;
       } else if ('x' in o) {
-        o.x = worldW - o.x;
+        const w = Number.isFinite(o.w) ? o.w : 0;
+        o.x = worldW - o.x - w;
       }
       if (FLIPPABLE_DIR.has(o.type)   && Number.isFinite(o.dir))   o.dir   = -o.dir;
       if (FLIPPABLE_FORCE.has(o.type) && Number.isFinite(o.force)) o.force = -o.force;
+    };
+    // Mirror entire selection across world center on X axis.
+    const mirrorSelected = () => {
+      const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+      const ids = state.selectedObsList.length ? state.selectedObsList : (state.selectedObs >= 0 ? [state.selectedObs] : []);
+      const valid = ids.filter(i => i >= 0 && i < lvl.data.obstacles.length);
+      if (!valid.length) { toast('Nothing selected to mirror'); return; }
+      pushHistory(true, 'Mirror selection');
+      const W = lvl.data.worldW;
+      valid.forEach(i => mirrorX(lvl.data.obstacles[i], W));
+      render();
+      toast(`Mirrored ${valid.length}`);
     };
 
     const bulkAlign = (axis) => {
@@ -2227,6 +2353,28 @@ window.CanvasLevelEditor = (() => {
         const snapIndicator = state.snap ? ' [snap]' : '';
         cp.textContent = `x: ${Math.round(p.x - LEFT_PAD)}  y: ${Math.round(p.y)}${snapIndicator}`;
       }
+      // Validation badge hover tooltip
+      let hovered = null;
+      if (state.showValidationBadges && state._validationBadges?.length) {
+        for (const bd of state._validationBadges) {
+          if (Math.hypot(p.x - bd.cx, p.y - bd.cy) <= bd.r + 2) { hovered = bd; break; }
+        }
+      }
+      let tipEl = $('validation-tooltip');
+      if (hovered) {
+        if (!tipEl) {
+          tipEl = document.createElement('div');
+          tipEl.id = 'validation-tooltip';
+          document.body.appendChild(tipEl);
+        }
+        tipEl.textContent = hovered.msg;
+        tipEl.className = 'v-tip v-tip-' + hovered.level;
+        tipEl.style.left = (e.clientX + 12) + 'px';
+        tipEl.style.top  = (e.clientY + 12) + 'px';
+        tipEl.style.display = '';
+      } else if (tipEl) {
+        tipEl.style.display = 'none';
+      }
       if (state.pendingPrefab) { state.pendingPrefabX = Math.round(p.x - LEFT_PAD); scheduleRender(); return; }
       if (state.marquee) { state.marquee.endX = p.x; state.marquee.endY = p.y; scheduleRender(); return; }
       if (!state.drag) return;
@@ -2380,7 +2528,11 @@ window.CanvasLevelEditor = (() => {
         const lvl = state.levels[state.currentIdx];
         if (!lvl) { render(); return; }
         const picks = [];
-        lvl.data.obstacles.forEach((o, i) => {
+        const candidates = (_spatial.count > 0 && _spatial.levelRef === lvl)
+          ? queryRect(x1, y1, x2, y2)
+          : lvl.data.obstacles.map((_, i) => i);
+        candidates.forEach(i => {
+          const o = lvl.data.obstacles[i]; if (!o) return;
           const b = o._bbox; if (!b) return;
           if (b[0] + b[2] >= x1 && b[0] <= x2 && b[1] + b[3] >= y1 && b[1] <= y2) picks.push(i);
         });
@@ -2705,6 +2857,7 @@ window.CanvasLevelEditor = (() => {
       if (!inField && mod && !e.shiftKey && (e.key === 'd' || e.key === 'D')) { e.preventDefault(); duplicateInPlace(); return; }
       if (!inField && mod && !e.shiftKey && (e.key === 'g' || e.key === 'G')) { e.preventDefault(); groupSelected(); return; }
       if (!inField && mod && e.shiftKey && (e.key === 'g' || e.key === 'G')) { e.preventDefault(); ungroupSelected(); return; }
+      if (!inField && mod && e.shiftKey && (e.key === 'm' || e.key === 'M')) { e.preventDefault(); mirrorSelected(); return; }
       if (!inField && (e.key === '?' || (e.shiftKey && e.key === '/'))) {
         e.preventDefault();
         const h = $('help-overlay'); if (h) { h.style.display = ''; $('help-close')?.focus(); }
@@ -3423,6 +3576,8 @@ window.CanvasLevelEditor = (() => {
       emit('obstacleSelect', { obs: state.selectedObs, kind: state.selectedKind });
       resizeCanvas();
       renderCanvas();
+      // Rebuild spatial index now that obstacle _bbox values are fresh from drawObstacle
+      rebuildSpatialIndex();
       renderLevelList();
       renderSlotGrid();
       renderValidation();
@@ -3764,7 +3919,12 @@ window.CanvasLevelEditor = (() => {
         { category: 'Actions', label: 'Align Bottom',                              run: () => alignSelected('bottom') },
         { category: 'Actions', label: 'Center Horizontally',                       run: () => alignSelected('centerH') },
         { category: 'Actions', label: 'Center Vertically',                         run: () => alignSelected('centerV') },
-        { category: 'Actions', label: 'Distribute Horizontally',                   run: () => bulkDistribute() }
+        { category: 'Actions', label: 'Distribute Horizontally',                   run: () => bulkDistribute() },
+        { category: 'Actions', label: 'Mirror Selection (X)',  hint: 'Ctrl+Shift+M', run: () => mirrorSelected() },
+        { category: 'Actions', label: 'Group Selection',       hint: 'Ctrl+G',       run: () => groupSelected() },
+        { category: 'Actions', label: 'Ungroup Selection',     hint: 'Ctrl+Shift+G', run: () => ungroupSelected() },
+        { category: 'Actions', label: 'Show Tutorial',                              run: () => startOnboarding(true) },
+        { category: 'Actions', label: 'Toggle Validation Badges',                   run: () => { state.showValidationBadges = !state.showValidationBadges; render(); toast('Badges ' + (state.showValidationBadges ? 'on' : 'off')); } }
       ];
       // Prefabs
       const allPrefabs = [...BUILTIN_PREFABS, ...state.userPrefabs];
@@ -3977,7 +4137,7 @@ window.CanvasLevelEditor = (() => {
     // ---------- Align/Distribute toolbar (renderProps hook via mutation observer) ----------
     const _alignToolbarHTML = () =>
       '<div class="align-toolbar" id="align-toolbar" style="display:flex;flex-wrap:wrap;gap:3px;margin:6px 0;padding:6px;border:1px solid var(--border);border-radius:4px;background:var(--panel-alt)">' +
-        '<strong style="width:100%;font-size:11px;margin-bottom:2px">Align / Distribute</strong>' +
+        '<strong style="width:100%;font-size:11px;margin-bottom:2px">Align / Distribute / Group</strong>' +
         '<button class="btn btn-mini" data-align="left"   title="Align left (Ctrl+Shift+L)">⇤</button>' +
         '<button class="btn btn-mini" data-align="centerH" title="Center horizontally">↔</button>' +
         '<button class="btn btn-mini" data-align="right"  title="Align right">⇥</button>' +
@@ -3985,6 +4145,9 @@ window.CanvasLevelEditor = (() => {
         '<button class="btn btn-mini" data-align="centerV" title="Center vertically">↕</button>' +
         '<button class="btn btn-mini" data-align="bottom" title="Align bottom">⇣</button>' +
         '<button class="btn btn-mini" data-distribute="x"  title="Distribute horizontally">⇿</button>' +
+        '<button class="btn btn-mini" data-mirror="x"      title="Mirror selection X (Ctrl+Shift+M)">⇋ Mirror</button>' +
+        '<button class="btn btn-mini" data-group="group"   title="Group (Ctrl+G)">⊞ Group</button>' +
+        '<button class="btn btn-mini" data-group="ungroup" title="Ungroup (Ctrl+Shift+G)">⊟ Ungroup</button>' +
       '</div>';
     const _injectAlignToolbar = () => {
       const body = $('props-body'); if (!body) return;
@@ -4002,6 +4165,15 @@ window.CanvasLevelEditor = (() => {
       body.querySelectorAll('#align-toolbar [data-distribute]').forEach(btn => {
         btn.addEventListener('click', () => bulkDistribute());
       });
+      body.querySelectorAll('#align-toolbar [data-mirror]').forEach(btn => {
+        btn.addEventListener('click', () => mirrorSelected());
+      });
+      body.querySelectorAll('#align-toolbar [data-group]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          if (btn.getAttribute('data-group') === 'group') groupSelected();
+          else ungroupSelected();
+        });
+      });
     };
     // Observe props-body for re-render
     const _propsBody = $('props-body');
@@ -4018,6 +4190,81 @@ window.CanvasLevelEditor = (() => {
         e.preventDefault();
         if (state.selectedObsList.length >= 2) alignSelected('left');
       }
+    });
+
+    // ---------- Onboarding tour ----------
+    const ONBOARDING_KEY = 'canvas_editor_onboarded';
+    const ONBOARDING_STEPS = [
+      { sel: '#editor-canvas',     title: 'Welcome',          msg: 'This is your level. Drag obstacles to position, scroll to pan, Cmd/Ctrl+wheel to zoom.' },
+      { sel: '#asset-palette',     title: 'Add obstacles',    msg: 'Pick a type from the palette, then click on the canvas to place it.' },
+      { sel: '#btn-cmd-palette',   title: 'Command palette',  msg: 'Cmd/Ctrl+K opens a fuzzy command palette — fastest way to do anything.' },
+      { sel: '#panel-prefabs',     title: 'Prefabs',          msg: 'Save selections as prefabs and re-use them across levels with one click.' },
+      { sel: '#btn-save',          title: 'Save your work',   msg: 'Cmd/Ctrl+S saves levels and (if Sync is on) pushes them to the running game.' }
+    ];
+    let _onboardEl = null;
+    let _onboardStep = 0;
+    const _renderOnboardStep = () => {
+      if (!_onboardEl) return;
+      const step = ONBOARDING_STEPS[_onboardStep];
+      const target = step ? document.querySelector(step.sel) : null;
+      const spot = _onboardEl.querySelector('.onboard-spot');
+      const card = _onboardEl.querySelector('.onboard-card');
+      if (target && spot && card) {
+        const r = target.getBoundingClientRect();
+        const pad = 6;
+        spot.style.left   = (r.left   - pad) + 'px';
+        spot.style.top    = (r.top    - pad) + 'px';
+        spot.style.width  = (r.width  + pad * 2) + 'px';
+        spot.style.height = (r.height + pad * 2) + 'px';
+        const cardX = Math.min(window.innerWidth - 320, Math.max(12, r.left));
+        const cardY = Math.min(window.innerHeight - 180, r.bottom + 12);
+        card.style.left = cardX + 'px';
+        card.style.top  = cardY + 'px';
+      }
+      const titleEl = _onboardEl.querySelector('.onboard-title');
+      const msgEl   = _onboardEl.querySelector('.onboard-msg');
+      const counter = _onboardEl.querySelector('.onboard-counter');
+      const next    = _onboardEl.querySelector('.onboard-next');
+      if (titleEl) titleEl.textContent = step.title;
+      if (msgEl)   msgEl.textContent   = step.msg;
+      if (counter) counter.textContent = (_onboardStep + 1) + ' / ' + ONBOARDING_STEPS.length;
+      if (next)    next.textContent    = (_onboardStep === ONBOARDING_STEPS.length - 1) ? 'Done' : 'Next';
+    };
+    const _closeOnboarding = () => {
+      try { localStorage.setItem(ONBOARDING_KEY, '1'); } catch (_) {}
+      if (_onboardEl) { _onboardEl.remove(); _onboardEl = null; }
+    };
+    const startOnboarding = (force = false) => {
+      if (_onboardEl) return;
+      try { if (!force && localStorage.getItem(ONBOARDING_KEY)) return; } catch (_) {}
+      _onboardStep = 0;
+      const overlay = document.createElement('div');
+      overlay.id = 'onboarding-overlay';
+      overlay.innerHTML =
+        '<div class="onboard-spot"></div>' +
+        '<div class="onboard-card">' +
+          '<div class="onboard-counter"></div>' +
+          '<div class="onboard-title"></div>' +
+          '<div class="onboard-msg"></div>' +
+          '<div class="onboard-actions">' +
+            '<button class="btn btn-mini onboard-skip">Skip</button>' +
+            '<button class="btn btn-mini btn-success onboard-next">Next</button>' +
+          '</div>' +
+        '</div>';
+      document.body.appendChild(overlay);
+      _onboardEl = overlay;
+      overlay.querySelector('.onboard-skip').addEventListener('click', _closeOnboarding);
+      overlay.querySelector('.onboard-next').addEventListener('click', () => {
+        if (_onboardStep < ONBOARDING_STEPS.length - 1) { _onboardStep++; _renderOnboardStep(); }
+        else _closeOnboarding();
+      });
+      _renderOnboardStep();
+    };
+    $('btn-show-tutorial')?.addEventListener('click', () => startOnboarding(true));
+    setTimeout(() => startOnboarding(false), 600);
+    canvas.addEventListener('mouseleave', () => {
+      const tipEl = $('validation-tooltip');
+      if (tipEl) tipEl.style.display = 'none';
     });
 
     // ---------- Beforeunload dirty guard ----------
@@ -4107,6 +4354,9 @@ window.CanvasLevelEditor = (() => {
       alignCenterV() { alignSelected('centerV'); },
       groupSelected,
       ungroupSelected,
+      mirrorSelected,
+      startOnboarding,
+      rebuildSpatialIndex,
       setSnapToObstacles(v) { state.snapToObstacles = !!v; },
       // Z-order public API
       bringForward(idx) {
