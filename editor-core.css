@@ -340,6 +340,16 @@ body.is-zen #workspace { grid-template-columns: 1fr !important; }
   flex-shrink: 0;
 }
 
+.asset-icon-img {
+  display: inline-block;
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  flex-shrink: 0;
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
+}
+
 .tool-row {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
