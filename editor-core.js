@@ -1458,9 +1458,15 @@ window.CanvasLevelEditor = (() => {
       b.dataset.type = type;
       b.title = ASSET_TOOLTIPS[type] || type;
       const icon = TYPE_ICONS[type];
-      b.innerHTML = icon
-        ? `<span class="asset-icon">${icon}</span><span>${type}</span>`
-        : `<span class="asset-swatch" style="background:${TYPE_COLORS[type] || '#888'}"></span><span>${type}</span>`;
+      let iconHtml;
+      if (icon && typeof icon === 'object' && icon.sprite) {
+        iconHtml = `<img src="${icon.sprite}" class="asset-icon-img" alt="">`;
+      } else if (icon) {
+        iconHtml = `<span class="asset-icon">${icon}</span>`;
+      } else {
+        iconHtml = `<span class="asset-swatch" style="background:${TYPE_COLORS[type] || '#888'}"></span>`;
+      }
+      b.innerHTML = `${iconHtml}<span>${type}</span>`;
       b.addEventListener('click', () => {
         state.tool = type;
         document.querySelectorAll('.asset-btn, .tool-btn').forEach(el => el.classList.remove('active'));
@@ -1985,7 +1991,7 @@ window.CanvasLevelEditor = (() => {
           if (lvl) {
             if (lvl.courtId != null && lvl.slot != null) {
               publishSync({ announce: false });
-              state._gameWin.location.href = `./?course=${lvl.courtId}&level=${lvl.slot}&ts=${Date.now()}`;
+              state._gameWin.location.href = `./?course=${lvl.courtId}&level=${lvl.slot}&editorSync=1&ts=${Date.now()}`;
             } else {
               writePreview(lvl);
               state._gameWin.location.href = `./?preview=1&ts=${Date.now()}`;
@@ -2211,7 +2217,7 @@ window.CanvasLevelEditor = (() => {
       const hasProperSlot = lvl.courtId != null && lvl.slot != null &&
         courseArr && courseArr[lvl.slot - 1];
       if (hasProperSlot) {
-        url = `./?course=${lvl.courtId}&level=${lvl.slot}&ts=${Date.now()}`;
+        url = `./?course=${lvl.courtId}&level=${lvl.slot}&editorSync=1&ts=${Date.now()}`;
       } else {
         if (!writePreview(lvl)) { toast('Preview save failed (storage?)'); return; }
         url = `./?preview=1&ts=${Date.now()}`;
