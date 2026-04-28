@@ -701,6 +701,30 @@ window.CanvasLevelEditor = (() => {
         }
       });
 
+      // Range resize handles for selected water (x1/x2)
+      if (state.selectedKind === 'obs' && state.selectedObs >= 0 && state.selectedObsList.length <= 1) {
+        const o = L.obstacles[state.selectedObs];
+        if (o && o.type === 'water' && o.x1 != null && o.x2 != null && o._bbox) {
+          const [bx, by, bw, bh] = o._bbox;
+          const midY = by + bh * 0.2;
+          const drawKnob = (x) => {
+            ctx.save();
+            ctx.shadowColor = 'rgba(0,0,0,0.25)';
+            ctx.shadowBlur = 4;
+            ctx.fillStyle = '#fff';
+            ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(x, midY, 7, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+            ctx.restore();
+          };
+          drawKnob(o.x1 + LEFT_PAD);
+          drawKnob(o.x2 + LEFT_PAD);
+        }
+      }
+
       // Feature 1: Draw dashed group outlines
       renderGroupOutlines(lvl);
 
@@ -2283,7 +2307,46 @@ window.CanvasLevelEditor = (() => {
       return Math.abs(p.x - hx) <= 6;
     };
 
+    // Helper: range obstacle resize handles (e.g. water x1/x2)
+    const rangeResizeHandleAt = (p) => {
+      if (state.selectedKind !== 'obs' || state.selectedObs < 0) return null;
+      const lvl = state.levels[state.currentIdx]; if (!lvl) return null;
+      const o = lvl.data.obstacles[state.selectedObs]; if (!o) return null;
+      if (o.type !== 'water') return null;
+      if (o.x1 == null || o.x2 == null) return null;
+      if (!o._bbox) return null;
+      const [bx, by, bw, bh] = o._bbox;
+      if (p.y < by - 10 || p.y > by + bh + 10) return null;
+      const leftX = o.x1 + LEFT_PAD;
+      const rightX = o.x2 + LEFT_PAD;
+      if (Math.abs(p.x - leftX) <= 10) return { edge: 'left', x: leftX, y: by + bh * 0.2 };
+      if (Math.abs(p.x - rightX) <= 10) return { edge: 'right', x: rightX, y: by + bh * 0.2 };
+      return null;
+    };
+
     canvas.addEventListener('mousemove', (e) => {
+      if (state._rangeResizeDrag) {
+        const p = canvasPt(e);
+        const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+        const o = lvl.data.obstacles[state._rangeResizeDrag.index]; if (!o) return;
+        const val = snap(p.x - LEFT_PAD);
+        const MIN_W = 40;
+        if (state._rangeResizeDrag.edge === 'left') {
+          o.x1 = Math.min(val, (o.x2 ?? val + MIN_W) - MIN_W);
+        } else {
+          o.x2 = Math.max(val, (o.x1 ?? val - MIN_W) + MIN_W);
+        }
+        if (o.hasCroc) {
+          const pad = 24;
+          const lo = (o.x1 ?? 0) + pad;
+          const hi = (o.x2 ?? 0) - pad;
+          if (o.crocX == null) o.crocX = (o.x1 + o.x2) / 2;
+          o.crocX = Math.max(lo, Math.min(hi, o.crocX));
+        }
+        scheduleRender();
+        e.stopPropagation();
+        return;
+      }
       if (state._worldResizeDrag) {
         const p = canvasPt(e);
         const lvl = state.levels[state.currentIdx]; if (!lvl) return;
@@ -2296,11 +2359,13 @@ window.CanvasLevelEditor = (() => {
       }
       const p = canvasPt(e);
       const hover = nearWorldResizeHandle(p);
+      const rHover = rangeResizeHandleAt(p);
       if (hover !== state._worldResizeHover) {
         state._worldResizeHover = hover;
-        canvas.style.cursor = hover ? 'ew-resize' : '';
+        canvas.style.cursor = hover ? 'ew-resize' : (rHover ? 'ew-resize' : '');
         scheduleRender();
       }
+      state._rangeResizeHover = !!rHover;
     }, true); // capture phase so it runs before the regular mousemove
 
     canvas.addEventListener('mousedown', (e) => {
@@ -2319,6 +2384,18 @@ window.CanvasLevelEditor = (() => {
         state._worldResizeDrag = { origW: lvl.data.worldW };
         canvas.style.cursor = 'ew-resize';
         e.preventDefault(); e.stopPropagation(); return;
+      }
+      // Range resize handle (water x1/x2)
+      const rh = rangeResizeHandleAt(p);
+      if (rh && state.levels[state.currentIdx]) {
+        const lvl = state.levels[state.currentIdx];
+        const idx = state.selectedObs;
+        if (idx >= 0) {
+          pushHistory(true, 'Resize range');
+          state._rangeResizeDrag = { index: idx, edge: rh.edge };
+          canvas.style.cursor = 'ew-resize';
+          e.preventDefault(); e.stopPropagation(); return;
+        }
       }
       if (state.tool === 'eraser') {
         const h = hitTest(p.x, p.y);
@@ -2554,6 +2631,11 @@ window.CanvasLevelEditor = (() => {
     window.addEventListener('mouseup', () => {
       if (state._worldResizeDrag) {
         state._worldResizeDrag = null;
+        canvas.style.cursor = '';
+        markDirty();
+      }
+      if (state._rangeResizeDrag) {
+        state._rangeResizeDrag = null;
         canvas.style.cursor = '';
         markDirty();
       }
