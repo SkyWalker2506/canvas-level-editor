@@ -2950,7 +2950,8 @@ window.CanvasLevelEditor = (() => {
       if (lvl && e.key === 'End')  { e.preventDefault(); scrollTo(lvl.data.hole.x, lvl.data.hole.y); }
       if (e.key === 'f' || e.key === 'F') { e.preventDefault(); fitCanvas(); render(); toast('Fit to window'); }
       if (e.key === 'p' || e.key === 'P') { e.preventDefault(); playInGame(); }
-      if (e.key === 'r' || e.key === 'R') { e.preventDefault(); state.showRuler = !state.showRuler; const or = $('opt-ruler'); if (or) or.checked = state.showRuler; saveSettings(); render(); toast(state.showRuler ? 'Ruler on' : 'Ruler off'); }
+      // Ruler toggle uses Alt+R to avoid stealing plain 'R' in embeds.
+      if (e.altKey && (e.key === 'r' || e.key === 'R')) { e.preventDefault(); state.showRuler = !state.showRuler; const or = $('opt-ruler'); if (or) or.checked = state.showRuler; saveSettings(); render(); toast(state.showRuler ? 'Ruler on' : 'Ruler off'); }
       if ((e.key === 'h' || e.key === 'H') && !mod) {
         const lvl = state.levels[state.currentIdx];
         if (lvl && state.selectedKind === 'obs' && state.selectedObs >= 0) {
@@ -3917,7 +3918,7 @@ window.CanvasLevelEditor = (() => {
         { category: 'Actions', label: 'Play Level',          hint: 'P',            run: () => playInGame() },
         { category: 'Actions', label: 'Show Help',           hint: '?',            run: () => { const h = $('help-overlay'); if (h) h.style.display = ''; } },
         { category: 'Actions', label: 'Toggle Grid',         hint: 'G',            run: () => { state.showGrid = !state.showGrid; const og = $('opt-grid'); if (og) og.checked = state.showGrid; saveSettings(); render(); } },
-        { category: 'Actions', label: 'Toggle Ruler',        hint: 'R',            run: () => { state.showRuler = !state.showRuler; const or = $('opt-ruler'); if (or) or.checked = state.showRuler; saveSettings(); render(); } },
+        { category: 'Actions', label: 'Toggle Ruler',        hint: 'Alt+R',        run: () => { state.showRuler = !state.showRuler; const or = $('opt-ruler'); if (or) or.checked = state.showRuler; saveSettings(); render(); } },
         { category: 'Actions', label: 'Select All Obstacles', hint: 'Ctrl+A',      run: () => { const lvl = state.levels[state.currentIdx]; if (!lvl?.data.obstacles.length) return; state.selectedKind = 'obs'; state.selectedObsList = lvl.data.obstacles.map((_, i) => i); state.selectedObs = state.selectedObsList[state.selectedObsList.length - 1]; render(); } },
         { category: 'Actions', label: 'Align Left',          hint: 'Ctrl+Shift+L', run: () => alignSelected('left') },
         { category: 'Actions', label: 'Align Right',                               run: () => alignSelected('right') },
