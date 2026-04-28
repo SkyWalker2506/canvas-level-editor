@@ -332,7 +332,40 @@ window.CanvasLevelEditor = (() => {
       try {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (raw) {
-          state.levels = JSON.parse(raw);
+          const parsed = JSON.parse(raw);
+          state.levels = Array.isArray(parsed) ? parsed : [];
+
+          // --- Migration / normalization ---
+          // Older editor builds (or external tools) may store levels as plain level-data objects
+          // or use different keys (courseId vs courtId). Normalize in-place so UI doesn't show
+          // "undefined" and sync payloads stay valid.
+          state.levels = state.levels
+            .map((lvl) => {
+              if (!lvl) return null;
+              // If this looks like a raw level data blob, wrap it.
+              if (!lvl.data && (lvl.worldW || lvl.ballStart || lvl.hole || lvl.obstacles)) {
+                lvl = { courtId: null, slot: null, data: lvl };
+              }
+              if (!lvl.data || typeof lvl.data !== 'object') return null;
+              if (lvl.courtId == null) {
+                const cid = (lvl.courseId ?? lvl.course ?? null);
+                if (cid != null && cid !== 'null') {
+                  const n = parseInt(cid, 10);
+                  if (!isNaN(n)) lvl.courtId = n;
+                }
+              }
+              if (lvl.slot != null && typeof lvl.slot !== 'number') {
+                const n = parseInt(lvl.slot, 10);
+                lvl.slot = isNaN(n) ? null : n;
+              }
+              if (!Array.isArray(lvl.data.obstacles)) lvl.data.obstacles = [];
+              if (typeof lvl.data.maxShots !== 'number') lvl.data.maxShots = 5;
+              if (!Array.isArray(lvl.data.starShots) || lvl.data.starShots.length < 3) {
+                lvl.data.starShots = [2, 3, 4];
+              }
+              return lvl;
+            })
+            .filter(Boolean);
           state._savedSnapshot = cloneDeep(state.levels);
         }
       } catch (e) { console.warn(e); }
