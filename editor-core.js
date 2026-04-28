@@ -3161,7 +3161,14 @@ window.CanvasLevelEditor = (() => {
       if (!confirm('Reset scene to default? Current obstacles will be lost.')) return;
       pushHistory(true);
       const def = cloneDeep(course.defaultLevel);
-      Object.assign(lvl.data, { obstacles: [] }, def);
+      // Reset should keep the scene empty (no obstacles), even if the course
+      // template includes example obstacles.
+      if (def && typeof def === 'object') delete def.obstacles;
+      Object.assign(lvl.data, def, { obstacles: [] });
+      // Reset is expected to be a "clean slate" visually.
+      state.showRuler = false;
+      const or = $('opt-ruler'); if (or) or.checked = state.showRuler;
+      saveSettings();
       save(); render(); toast('Scene reset to default');
     });
     document.getElementById('canvas-wrap')?.addEventListener('scroll', () => { renderMinimap(); });
