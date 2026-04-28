@@ -2663,11 +2663,7 @@ window.CanvasLevelEditor = (() => {
         canvas.style.cursor = '';
         markDirty();
       }
-      if (state._rangeResizeDrag) {
-        state._rangeResizeDrag = null;
-        canvas.style.cursor = '';
-        markDirty();
-      }
+      if (state._obsResizeDrag) { state._obsResizeDrag = null; canvas.style.cursor = ''; markDirty(); render(); }
       if (state.drag) { state.smartGuideX = null; state.snapGuideLines = null; }
       state.drag = null;
       if (state.marquee) {
@@ -4422,6 +4418,7 @@ window.CanvasLevelEditor = (() => {
     canvas.addEventListener('mouseleave', () => {
       const tipEl = $('validation-tooltip');
       if (tipEl) tipEl.style.display = 'none';
+      if (state._obsResizeDrag) { state._obsResizeDrag = null; canvas.style.cursor = ''; markDirty(); render(); }
     });
 
     // ---------- Beforeunload dirty guard ----------
