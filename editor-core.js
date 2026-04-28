@@ -127,6 +127,8 @@ window.CanvasLevelEditor = (() => {
       gridSize: config.gridSize || GRID,
       _worldResizeHover: false,
       _worldResizeDrag: null,
+      _obsResizeHover: null,
+      _obsResizeDrag: null,
       pasteOffset: config.pasteOffset ?? 20,
       _pasteCount: 0,
       _lastClipboardKey: null,
@@ -701,27 +703,39 @@ window.CanvasLevelEditor = (() => {
         }
       });
 
-      // Range resize handles for selected water (x1/x2)
-      if (state.selectedKind === 'obs' && state.selectedObs >= 0 && state.selectedObsList.length <= 1) {
+      // Obstacle resize handles (plugin-driven)
+      if (config.getResizeHandles && state.selectedKind === 'obs' && state.selectedObs >= 0 && state.selectedObsList.length <= 1) {
         const o = L.obstacles[state.selectedObs];
-        if (o && o.type === 'water' && o.x1 != null && o.x2 != null && o._bbox) {
-          const [bx, by, bw, bh] = o._bbox;
-          const midY = by + bh * 0.2;
-          const drawKnob = (x) => {
-            ctx.save();
-            ctx.shadowColor = 'rgba(0,0,0,0.25)';
-            ctx.shadowBlur = 4;
-            ctx.fillStyle = '#fff';
-            ctx.strokeStyle = 'rgba(0,0,0,0.65)';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.arc(x, midY, 7, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.stroke();
-            ctx.restore();
-          };
-          drawKnob(o.x1 + LEFT_PAD);
-          drawKnob(o.x2 + LEFT_PAD);
+        if (o) {
+          let hs = [];
+          try {
+            hs = config.getResizeHandles(o, lvl, {
+              leftPad: LEFT_PAD,
+              groundY: GY,
+              canvasH: CANVAS_H,
+              zoom: state.zoom,
+              snap,
+            }) || [];
+          } catch (_) { hs = []; }
+          if (Array.isArray(hs) && hs.length) {
+            const drawKnob = (h) => {
+              const x = h.x ?? 0;
+              const y = h.y ?? 0;
+              const r = h.radius ?? 7;
+              ctx.save();
+              ctx.shadowColor = 'rgba(0,0,0,0.25)';
+              ctx.shadowBlur = 4;
+              ctx.fillStyle = h.fill || '#fff';
+              ctx.strokeStyle = h.stroke || 'rgba(0,0,0,0.65)';
+              ctx.lineWidth = h.lineWidth ?? 2;
+              ctx.beginPath();
+              ctx.arc(x, y, r, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.stroke();
+              ctx.restore();
+            };
+            hs.forEach(drawKnob);
+          }
         }
       }
 
@@ -2307,41 +2321,56 @@ window.CanvasLevelEditor = (() => {
       return Math.abs(p.x - hx) <= 6;
     };
 
-    // Helper: range obstacle resize handles (e.g. water x1/x2)
-    const rangeResizeHandleAt = (p) => {
-      if (state.selectedKind !== 'obs' || state.selectedObs < 0) return null;
+    const getSelectedObstacle = () => {
       const lvl = state.levels[state.currentIdx]; if (!lvl) return null;
+      if (state.selectedKind !== 'obs' || state.selectedObs < 0) return null;
       const o = lvl.data.obstacles[state.selectedObs]; if (!o) return null;
-      if (o.type !== 'water') return null;
-      if (o.x1 == null || o.x2 == null) return null;
-      if (!o._bbox) return null;
-      const [bx, by, bw, bh] = o._bbox;
-      if (p.y < by - 10 || p.y > by + bh + 10) return null;
-      const leftX = o.x1 + LEFT_PAD;
-      const rightX = o.x2 + LEFT_PAD;
-      if (Math.abs(p.x - leftX) <= 10) return { edge: 'left', x: leftX, y: by + bh * 0.2 };
-      if (Math.abs(p.x - rightX) <= 10) return { edge: 'right', x: rightX, y: by + bh * 0.2 };
+      return { lvl, o, index: state.selectedObs };
+    };
+
+    const obsResizeHandleAt = (p) => {
+      if (!config.getResizeHandles) return null;
+      const sel = getSelectedObstacle(); if (!sel) return null;
+      if (state.selectedObsList && state.selectedObsList.length > 1) return null;
+      let hs = [];
+      try {
+        hs = config.getResizeHandles(sel.o, sel.lvl, {
+          leftPad: LEFT_PAD,
+          groundY: GY,
+          canvasH: CANVAS_H,
+          zoom: state.zoom,
+          snap,
+        }) || [];
+      } catch (_) { hs = []; }
+      if (!Array.isArray(hs) || !hs.length) return null;
+      for (let i = 0; i < hs.length; i++) {
+        const h = hs[i];
+        const r = h.hitRadius ?? 12;
+        const hx = h.x ?? 0;
+        const hy = h.y ?? 0;
+        if (Math.hypot(p.x - hx, p.y - hy) <= r) return { handle: h };
+      }
       return null;
     };
 
     canvas.addEventListener('mousemove', (e) => {
-      if (state._rangeResizeDrag) {
+      if (state._obsResizeDrag) {
         const p = canvasPt(e);
-        const lvl = state.levels[state.currentIdx]; if (!lvl) return;
-        const o = lvl.data.obstacles[state._rangeResizeDrag.index]; if (!o) return;
-        const val = snap(p.x - LEFT_PAD);
-        const MIN_W = 40;
-        if (state._rangeResizeDrag.edge === 'left') {
-          o.x1 = Math.min(val, (o.x2 ?? val + MIN_W) - MIN_W);
-        } else {
-          o.x2 = Math.max(val, (o.x1 ?? val - MIN_W) + MIN_W);
-        }
-        if (o.hasCroc) {
-          const pad = 24;
-          const lo = (o.x1 ?? 0) + pad;
-          const hi = (o.x2 ?? 0) - pad;
-          if (o.crocX == null) o.crocX = (o.x1 + o.x2) / 2;
-          o.crocX = Math.max(lo, Math.min(hi, o.crocX));
+        const sel = getSelectedObstacle();
+        if (sel && sel.index === state._obsResizeDrag.index && config.applyResizeDrag) {
+          try {
+            config.applyResizeDrag(sel.o, sel.lvl, state._obsResizeDrag.handle, {
+              canvasX: p.x,
+              canvasY: p.y,
+              x: snap(p.x - LEFT_PAD),
+              y: snap(p.y),
+              leftPad: LEFT_PAD,
+              groundY: GY,
+              canvasH: CANVAS_H,
+              zoom: state.zoom,
+              snap,
+            });
+          } catch (_) {}
         }
         scheduleRender();
         e.stopPropagation();
@@ -2359,12 +2388,12 @@ window.CanvasLevelEditor = (() => {
       }
       const p = canvasPt(e);
       const hover = nearWorldResizeHandle(p);
-      const rHover = rangeResizeHandleAt(p);
-      const wantCursor = (hover || rHover) ? 'ew-resize' : '';
+      const oh = obsResizeHandleAt(p);
+      const wantCursor = hover ? 'ew-resize' : (oh?.handle?.cursor || (oh ? 'ew-resize' : ''));
       const cursorChanged = canvas.style.cursor !== wantCursor;
-      const hoverChanged = (hover !== state._worldResizeHover) || (!!rHover !== !!state._rangeResizeHover);
+      const hoverChanged = (hover !== state._worldResizeHover) || ((!!oh) !== (!!state._obsResizeHover));
       state._worldResizeHover = hover;
-      state._rangeResizeHover = !!rHover;
+      state._obsResizeHover = oh ? oh.handle : null;
       if (cursorChanged) canvas.style.cursor = wantCursor;
       if (hoverChanged) scheduleRender();
     }, true); // capture phase so it runs before the regular mousemove
@@ -2386,15 +2415,14 @@ window.CanvasLevelEditor = (() => {
         canvas.style.cursor = 'ew-resize';
         e.preventDefault(); e.stopPropagation(); return;
       }
-      // Range resize handle (water x1/x2)
-      const rh = rangeResizeHandleAt(p);
-      if (rh && state.levels[state.currentIdx]) {
-        const lvl = state.levels[state.currentIdx];
+      // Obstacle resize handle (config-driven)
+      const oh = obsResizeHandleAt(p);
+      if (oh && state.levels[state.currentIdx]) {
         const idx = state.selectedObs;
         if (idx >= 0) {
-          pushHistory(true, 'Resize range');
-          state._rangeResizeDrag = { index: idx, edge: rh.edge };
-          canvas.style.cursor = 'ew-resize';
+          pushHistory(true, config.resizeHistoryLabel || 'Resize');
+          state._obsResizeDrag = { index: idx, handle: oh.handle };
+          canvas.style.cursor = oh.handle.cursor || 'ew-resize';
           e.preventDefault(); e.stopPropagation(); return;
         }
       }
