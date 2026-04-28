@@ -514,7 +514,7 @@ window.CanvasLevelEditor = (() => {
           time: 0.3,
           ballStart: { x: 100, y: GY - 30 },
           hole: { x: 700, y: GY },
-          maxShots: 4,
+          maxShots: 5,
           starShots: [2, 3, 4],
           obstacles: []
         }, def)
