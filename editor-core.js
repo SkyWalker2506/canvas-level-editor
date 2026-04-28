@@ -2360,12 +2360,13 @@ window.CanvasLevelEditor = (() => {
       const p = canvasPt(e);
       const hover = nearWorldResizeHandle(p);
       const rHover = rangeResizeHandleAt(p);
-      if (hover !== state._worldResizeHover) {
-        state._worldResizeHover = hover;
-        canvas.style.cursor = hover ? 'ew-resize' : (rHover ? 'ew-resize' : '');
-        scheduleRender();
-      }
+      const wantCursor = (hover || rHover) ? 'ew-resize' : '';
+      const cursorChanged = canvas.style.cursor !== wantCursor;
+      const hoverChanged = (hover !== state._worldResizeHover) || (!!rHover !== !!state._rangeResizeHover);
+      state._worldResizeHover = hover;
       state._rangeResizeHover = !!rHover;
+      if (cursorChanged) canvas.style.cursor = wantCursor;
+      if (hoverChanged) scheduleRender();
     }, true); // capture phase so it runs before the regular mousemove
 
     canvas.addEventListener('mousedown', (e) => {
