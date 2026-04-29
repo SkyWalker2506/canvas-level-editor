@@ -2537,112 +2537,30 @@ window.CanvasLevelEditor = (() => {
       } else if (state.drag.kind === 'hole') {
         lvl.data.hole.x = snap(state.drag.origX + dx);
       } else if (state.drag.kind === 'obs') {
-        const ALIGN_PX = 8;
-        const wantAlign = !e.altKey;
         const ids = state.selectedObsList.length ? state.selectedObsList : [state.drag.index];
         const primary = lvl.data.obstacles[state.drag.index];
-        const neighborXs = lvl.data.obstacles
-          .filter((ob, i) => !ids.includes(i))
-          .flatMap(ob => {
-            const pts = [];
-            if (ob.x1 != null) { pts.push(ob.x1, ob.x2, (ob.x1 + ob.x2) / 2); }
-            else if (ob.x != null) pts.push(ob.x);
-            return pts;
-          })
-          .filter(x => x != null);
         state.smartGuideX = null;
-        const snapToNeighbor = (val) => {
-          if (!wantAlign) return val;
-          for (const nx of neighborXs) if (Math.abs(val - nx) <= ALIGN_PX) { state.smartGuideX = nx; return nx; }
-          const ballX = lvl.data.ballStart?.x;
-          if (ballX != null && Math.abs(val - ballX) <= ALIGN_PX) { state.smartGuideX = ballX; return ballX; }
-          const holeX = lvl.data.hole?.x;
-          if (holeX != null && Math.abs(val - holeX) <= ALIGN_PX) { state.smartGuideX = holeX; return holeX; }
-          return val;
-        };
-        let newPrimaryX;
-        let deltaX;
+        state.snapGuideLines = null;
+        const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+        let pointerWorldX = clamp(Math.round(p.x - LEFT_PAD), 0, lvl.data.worldW || 0);
+        let pointerY = clamp(Math.round(p.y), 0, CANVAS_H);
+        if (e.shiftKey) {
+          if (Math.abs(dx) > Math.abs(dy)) pointerY = primary.y ?? pointerY;
+          else pointerWorldX = primary.x1 != null ? Math.round((primary.x1 + primary.x2) / 2) : (primary.x ?? pointerWorldX);
+        }
+        let deltaX = 0;
+        let deltaY = 0;
         if ('x1' in primary) {
           const w = primary.x2 - primary.x1;
-          const sx = snap(state.drag.origX + dx);
-          const centered = sx + w / 2;
-          newPrimaryX = snapToNeighbor(centered) - w / 2;
+          const newPrimaryX = clamp(pointerWorldX - w / 2, 0, Math.max(0, (lvl.data.worldW || 0) - w));
           deltaX = newPrimaryX - primary.x1;
         } else {
-          newPrimaryX = snapToNeighbor(snap(state.drag.origX + dx));
+          const newPrimaryX = pointerWorldX;
           deltaX = newPrimaryX - primary.x;
         }
-        let deltaY = snap(state.drag.origY + dy) - state.drag.origY;
         const yLocked = config.yLockedTypes || new Set(['hill','movingHill','trampoline','spring','portal']);
-
-        // Feature 3: snap-to-obstacle magnetic snap
-        state.snapGuideLines = null;
-        if (state.snapToObstacles && state.snap) {
-          const SNAP_OBS_PX = 8;
-          const guides = [];
-          // Compute prospective primary edges after deltaX
-          const primaryAfter = { ...primary };
-          if ('x1' in primaryAfter) { primaryAfter.x1 += deltaX; primaryAfter.x2 += deltaX; }
-          else if ('x' in primaryAfter) { primaryAfter.x += deltaX; }
-          if ('y' in primaryAfter) primaryAfter.y += deltaY;
-
-          const neighborObs = lvl.data.obstacles.filter((_, i) => !ids.includes(i));
-          let snapDX = null;
-          let snapDY = null;
-
-          // X edge snap
-          const primLeft  = primaryAfter.x1 != null ? primaryAfter.x1 : (primaryAfter.x ?? 0);
-          const primRight = primaryAfter.x2 != null ? primaryAfter.x2 : (primaryAfter.x ?? 0);
-          const primWidth = primaryAfter.x2 != null ? primaryAfter.x2 - primaryAfter.x1 : (primary.w ?? 0);
-
-          for (const nb of neighborObs) {
-            if (!nb._bbox) continue;
-            // nb edges in world coords (subtract LEFT_PAD)
-            const nbLeft  = nb._bbox[0] - LEFT_PAD;
-            const nbRight = nb._bbox[0] + nb._bbox[2] - LEFT_PAD;
-            const nbTop   = nb._bbox[1];
-            const nbBot   = nb._bbox[1] + nb._bbox[3];
-            const candidates = [
-              { srcEdge: primLeft,  tgtEdge: nbLeft  },
-              { srcEdge: primLeft,  tgtEdge: nbRight },
-              { srcEdge: primRight, tgtEdge: nbLeft  },
-              { srcEdge: primRight, tgtEdge: nbRight },
-            ];
-            for (const c of candidates) {
-              if (Math.abs(c.srcEdge - c.tgtEdge) <= SNAP_OBS_PX) {
-                if (snapDX === null) {
-                  snapDX = c.tgtEdge - c.srcEdge;
-                  // guide: vertical line at snapped edge (canvas x = worldX + LEFT_PAD)
-                  guides.push({ x1: c.tgtEdge + LEFT_PAD, y1: 0, x2: c.tgtEdge + LEFT_PAD, y2: CANVAS_H });
-                }
-                break;
-              }
-            }
-            // Y edge snap
-            if ('y' in primary) {
-              const primTop = primaryAfter.y != null ? primaryAfter.y - (primary.h ?? 0) : 0;
-              const primBot = primaryAfter.y ?? GY;
-              const yCandidates = [
-                { srcEdge: primTop, tgtEdge: nbTop },
-                { srcEdge: primTop, tgtEdge: nbBot },
-                { srcEdge: primBot, tgtEdge: nbTop },
-                { srcEdge: primBot, tgtEdge: nbBot },
-              ];
-              for (const c of yCandidates) {
-                if (Math.abs(c.srcEdge - c.tgtEdge) <= SNAP_OBS_PX) {
-                  if (snapDY === null) {
-                    snapDY = c.tgtEdge - c.srcEdge;
-                    guides.push({ x1: 0, y1: c.tgtEdge, x2: lvl.data.worldW + LEFT_PAD * 2, y2: c.tgtEdge });
-                  }
-                  break;
-                }
-              }
-            }
-            if (snapDX !== null && snapDY !== null) break;
-          }
-          if (snapDX !== null) deltaX += snapDX;
-          if (snapDY !== null) deltaY += snapDY;
-          if (guides.length) state.snapGuideLines = guides;
+        if ('y' in primary && primary.type !== 'magnet' && !yLocked.has(primary.type)) {
+          deltaY = pointerY - primary.y;
         }
 
         ids.forEach(i => {
