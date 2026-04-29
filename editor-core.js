@@ -2542,8 +2542,8 @@ window.CanvasLevelEditor = (() => {
         state.smartGuideX = null;
         state.snapGuideLines = null;
         const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
-        let pointerWorldX = clamp(Math.round(p.x - LEFT_PAD), 0, lvl.data.worldW || 0);
-        let pointerY = clamp(Math.round(p.y), 0, CANVAS_H);
+        let pointerWorldX = clamp(snap(p.x - LEFT_PAD), 0, lvl.data.worldW || 0);
+        let pointerY = clamp(snap(p.y), 0, CANVAS_H);
         if (e.shiftKey) {
           if (Math.abs(dx) > Math.abs(dy)) pointerY = primary.y ?? pointerY;
           else pointerWorldX = primary.x1 != null ? Math.round((primary.x1 + primary.x2) / 2) : (primary.x ?? pointerWorldX);
@@ -2552,10 +2552,10 @@ window.CanvasLevelEditor = (() => {
         let deltaY = 0;
         if ('x1' in primary) {
           const w = primary.x2 - primary.x1;
-          const newPrimaryX = clamp(pointerWorldX - w / 2, 0, Math.max(0, (lvl.data.worldW || 0) - w));
+          const newPrimaryX = clamp(snap(pointerWorldX - w / 2), 0, Math.max(0, (lvl.data.worldW || 0) - w));
           deltaX = newPrimaryX - primary.x1;
         } else {
-          const newPrimaryX = pointerWorldX;
+          const newPrimaryX = clamp(pointerWorldX, 0, lvl.data.worldW || 0);
           deltaX = newPrimaryX - primary.x;
         }
         const yLocked = config.yLockedTypes || new Set(['hill','movingHill','trampoline','spring','portal']);
