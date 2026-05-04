@@ -2,6 +2,8 @@
 
 Goal of canvas-level-editor: a generic 2D level editor that any browser-game project can host via a plugin.
 
+> **Phase 1 status (v0.2.0, 2026-05-03):** ~20 of 80 references extracted via `config.leftPad`, `config.levelDataDefaults`, `config.themeDefaults`, `config.thumbnailThemes`, `config.migrationFields`. Remaining ~60 (point-entity hit-test, drag, property-panel fieldset, course-rule lookups, keyboard tools) deferred to v0.3 — they require a `pointEntities` registry which still needs design + tests. See CHANGELOG 0.2.0.
+
 ## Status
 
 Plugin contract for **rendering** is clean — `config.draw*` callbacks, `config.typeIcons`, `config.builtinPrefabs`, etc. are golf-agnostic and host-supplied.

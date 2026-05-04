@@ -38,6 +38,13 @@ window.CanvasLevelEditor = (() => {
   //
   // Course UI:
   //   courseNames                    — shown in sync panel chips
+  //
+  // v0.2 schema-descriptor options (all optional, with golf-flavored fallbacks):
+  //   leftPad             — number, canvas left margin in pixels (default 25)
+  //   levelDataDefaults   — () => object, returns initial level.data shape
+  //   themeDefaults       — { sky1, sky2, ground, dirt }, fallback when course.theme missing
+  //   thumbnailThemes     — { [themeName]: { sky, ground } } for level-list mini-preview
+  //   migrationFields     — { [field]: { type:'number'|'array3', default } } for legacy normalization
 
   // ---------- Config validation ----------
   const validateConfig = (config) => {
@@ -84,8 +91,35 @@ window.CanvasLevelEditor = (() => {
       document.head.appendChild(styleTag);
     }
     const PUBLISH_HISTORY_MAX = 20;
-    const LEFT_PAD = 25;
+    const LEFT_PAD = config.leftPad ?? 25;
     const GRID = 20; // default grid size (5–100 valid range)
+
+    // ---------- v0.2: host-provided schema defaults ----------
+    // Hosts supply level-data defaults (ballStart/hole/maxShots/starShots are golf-named
+    // here only for backwards compat; new hosts can override entirely).
+    const LEVEL_DATA_DEFAULTS = (typeof config.levelDataDefaults === 'function')
+      ? config.levelDataDefaults
+      : () => Object.assign({
+          name: 'New Level',
+          subtitle: '',
+          description: '',
+          worldW: 800,
+          time: 0.3,
+          ballStart: { x: 100, y: (config.groundY ?? 380) - 30 },
+          hole: { x: 700, y: (config.groundY ?? 380) },
+          maxShots: 5,
+          starShots: [2, 3, 4],
+          obstacles: []
+        }, config.levelDataDefaults || {});
+    // Theme fallback colors when a course has no theme block.
+    const THEME_DEFAULTS = config.themeDefaults || {
+      sky1: '#c9e3ef', sky2: '#eaf4da', ground: '#9cc26d', dirt: '#7a5a38'
+    };
+    // Numeric-field migration table: { fieldName: { type:'number'|'array3', default } }
+    const MIGRATION_FIELDS = config.migrationFields || {
+      maxShots: { type: 'number', default: 5 },
+      starShots: { type: 'array3', default: [2, 3, 4] }
+    };
 
     // ---------- Dirty flag ----------
     let _isDirty = false;
@@ -361,9 +395,12 @@ window.CanvasLevelEditor = (() => {
                 lvl.slot = isNaN(n) ? null : n;
               }
               if (!Array.isArray(lvl.data.obstacles)) lvl.data.obstacles = [];
-              if (typeof lvl.data.maxShots !== 'number') lvl.data.maxShots = 5;
-              if (!Array.isArray(lvl.data.starShots) || lvl.data.starShots.length < 3) {
-                lvl.data.starShots = [2, 3, 4];
+              for (const [field, spec] of Object.entries(MIGRATION_FIELDS)) {
+                if (spec.type === 'number' && typeof lvl.data[field] !== 'number') {
+                  lvl.data[field] = spec.default;
+                } else if (spec.type === 'array3' && (!Array.isArray(lvl.data[field]) || lvl.data[field].length < 3)) {
+                  lvl.data[field] = spec.default.slice();
+                }
               }
               return lvl;
             })
@@ -541,18 +578,7 @@ window.CanvasLevelEditor = (() => {
       return {
         courtId,
         slot: null,
-        data: Object.assign({
-          name: 'New Level',
-          subtitle: '',
-          description: '',
-          worldW: 800,
-          time: 0.3,
-          ballStart: { x: 100, y: GY - 30 },
-          hole: { x: 700, y: GY },
-          maxShots: 5,
-          starShots: [2, 3, 4],
-          obstacles: []
-        }, def)
+        data: Object.assign(LEVEL_DATA_DEFAULTS(), def)
       };
     };
 
@@ -629,15 +655,15 @@ window.CanvasLevelEditor = (() => {
       const W = L.worldW + LEFT_PAD * 2;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const course = currentCourse();
-      const theme = course ? course.theme : { sky1: '#c9e3ef', sky2: '#eaf4da', ground: '#9cc26d', dirt: '#7a5a38' };
+      const theme = course ? course.theme : THEME_DEFAULTS;
 
       // Sky — plugin can override via drawSky
       if (config.drawSky) {
         config.drawSky(ctx, W, CANVAS_H, lvl.data.time);
       } else {
         const sky = ctx.createLinearGradient(0, 0, 0, GY);
-        sky.addColorStop(0, theme.sky1 || '#87ceeb');
-        sky.addColorStop(1, theme.sky2 || '#e0f0ff');
+        sky.addColorStop(0, theme.sky1 || THEME_DEFAULTS.sky1 || '#87ceeb');
+        sky.addColorStop(1, theme.sky2 || THEME_DEFAULTS.sky2 || '#e0f0ff');
         ctx.fillStyle = sky;
         ctx.fillRect(0, 0, W, GY);
       }
@@ -1350,9 +1376,11 @@ window.CanvasLevelEditor = (() => {
         thumb.style.cssText = 'vertical-align:middle;margin-right:4px;border-radius:2px;';
         try {
           const tc = thumb.getContext('2d');
-          tc.fillStyle = (lvl.data.theme === 'night' ? '#1a1a2e' : '#87CEEB');
+          const _thumbTheme = (config.thumbnailThemes && config.thumbnailThemes[lvl.data.theme])
+            || { sky: THEME_DEFAULTS.sky1 || '#87CEEB', ground: THEME_DEFAULTS.ground || '#4a7c3f' };
+          tc.fillStyle = _thumbTheme.sky;
           tc.fillRect(0, 0, 16, 5);
-          tc.fillStyle = (lvl.data.theme === 'desert' ? '#c8a96e' : '#4a7c3f');
+          tc.fillStyle = _thumbTheme.ground;
           tc.fillRect(0, 5, 16, 5);
           const worldW = lvl.data.worldW || 800;
           (lvl.data.obstacles || []).forEach(o => {
