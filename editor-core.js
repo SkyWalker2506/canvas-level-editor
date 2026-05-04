@@ -3906,10 +3906,19 @@ window.CanvasLevelEditor = (() => {
       helpBox.insertBefore(searchWrap, helpEl);
     }
 
-    // URL params: ?level=<base64-json> headless mode, ?zen=1
+    // URL params:
+    //   ?level=<int>            → game-style deep link (course+level navigated by host plugin)
+    //   ?level=<base64-json>    → headless mode: inline level data
+    //   ?zen=1                  → hide chrome
     const __autoParams = new URLSearchParams(location.search);
     const __levelParam = __autoParams.get('level');
-    if (__levelParam) {
+    // Plain integer (e.g. "1", "12") is the canonical game URL form. Don't run
+    // it through atob() — that fires a noisy decode warning every load.
+    const __looksBase64 = !!__levelParam &&
+      __levelParam.length > 8 &&
+      /^[A-Za-z0-9+/=_-]+$/.test(__levelParam) &&
+      !/^\d+$/.test(__levelParam);
+    if (__levelParam && __looksBase64) {
       try {
         const decoded = JSON.parse(decodeURIComponent(escape(atob(__levelParam))));
         const data = decoded.data || decoded;
