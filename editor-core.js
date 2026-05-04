@@ -40,11 +40,18 @@ window.CanvasLevelEditor = (() => {
   //   courseNames                    — shown in sync panel chips
   //
   // v0.2 schema-descriptor options (all optional, with golf-flavored fallbacks):
-  //   leftPad             — number, canvas left margin in pixels (default 25)
+  //   leftPad             — number, canvas left margin in pixels (default 25). Deprecated alias for padding.left.
   //   levelDataDefaults   — () => object, returns initial level.data shape
   //   themeDefaults       — { sky1, sky2, ground, dirt }, fallback when course.theme missing
   //   thumbnailThemes     — { [themeName]: { sky, ground } } for level-list mini-preview
   //   migrationFields     — { [field]: { type:'number'|'array3', default } } for legacy normalization
+  //
+  // v0.3 schema-descriptor options (all optional, with golf-flavored fallbacks):
+  //   padding             — { top, right, bottom, left } per-axis canvas padding (replaces single leftPad)
+  //   pointEntities       — array of { id, label, toolKey, selectedKind, defaults, hitTest, highlight,
+  //                                     miniMap, draw, dragAxis, formField, courseRule } singleton
+  //                         entities (one instance per level, stored at level.data[id]). Replaces hardcoded
+  //                         ballStart / hole field access for hit-test, drag, keyboard, mini-map, property panel.
 
   // ---------- Config validation ----------
   const validateConfig = (config) => {
@@ -91,7 +98,15 @@ window.CanvasLevelEditor = (() => {
       document.head.appendChild(styleTag);
     }
     const PUBLISH_HISTORY_MAX = 20;
-    const LEFT_PAD = config.leftPad ?? 25;
+    // v0.3: per-axis padding. `leftPad` is kept as a backwards-compat alias for padding.left.
+    const _padCfg = (config.padding && typeof config.padding === 'object') ? config.padding : {};
+    const PADDING = {
+      top:    _padCfg.top    ?? 0,
+      right:  _padCfg.right  ?? 0,
+      bottom: _padCfg.bottom ?? 0,
+      left:   _padCfg.left   ?? (config.leftPad ?? 25)
+    };
+    const LEFT_PAD = PADDING.left;
     const GRID = 20; // default grid size (5–100 valid range)
 
     // ---------- v0.2: host-provided schema defaults ----------
@@ -119,6 +134,57 @@ window.CanvasLevelEditor = (() => {
     const MIGRATION_FIELDS = config.migrationFields || {
       maxShots: { type: 'number', default: 5 },
       starShots: { type: 'array3', default: [2, 3, 4] }
+    };
+
+    // v0.3: point-entity registry. Each entry describes a singleton entity stored
+    // directly on `level.data[id]` as `{x, y}`. Default registry preserves the
+    // historic golf shape (ballStart + hole) so existing hosts keep working unchanged.
+    const _GY = GY;
+    const POINT_ENTITIES = (Array.isArray(config.pointEntities) && config.pointEntities.length)
+      ? config.pointEntities
+      : [
+          {
+            id: 'ballStart',
+            label: 'Ball',
+            toolKey: 'ballStart',
+            selectedKind: 'ball',
+            defaults: () => ({ x: 100, y: _GY - 30 }),
+            hitTest: (pos, x, y) => Math.hypot(x - pos.x, y - pos.y) < 18,
+            highlight: (pos) => [pos.x - 16, pos.y - 16, 32, 32],
+            miniMap: { color: '#ffffff', radius: 3 },
+            dragAxis: 'xy',
+            formField: { x: 'in-ballX' },
+            courseRule: 'ballStartX'
+          },
+          {
+            id: 'hole',
+            label: 'Hole',
+            toolKey: 'hole',
+            selectedKind: 'hole',
+            defaults: () => ({ x: 700, y: _GY }),
+            hitTest: (pos, x, y) => x > pos.x - 20 && x < pos.x + 20 && y > pos.y - 42 && y < pos.y + 8,
+            highlight: (pos) => [pos.x - 20, pos.y - 42, 40, 48],
+            miniMap: { color: '#d83d3d', radius: 3 },
+            dragAxis: 'x',
+            formField: { x: 'in-holeX' }
+          }
+        ];
+    const PE_BY_ID         = Object.fromEntries(POINT_ENTITIES.map(e => [e.id, e]));
+    const PE_BY_TOOL       = Object.fromEntries(POINT_ENTITIES.filter(e => e.toolKey).map(e => [e.toolKey, e]));
+    const PE_BY_KIND       = Object.fromEntries(POINT_ENTITIES.filter(e => e.selectedKind).map(e => [e.selectedKind, e]));
+    // Read entity position from level.data via its id; fallback to defaults if missing.
+    const pePos = (L, ent) => {
+      const v = L && L[ent.id];
+      if (v && typeof v.x === 'number' && typeof v.y === 'number') return v;
+      return ent.defaults ? ent.defaults() : { x: 0, y: 0 };
+    };
+    // Ensure `level.data[ent.id]` exists; if not, populate with defaults.
+    const peEnsure = (L, ent) => {
+      if (!L) return null;
+      if (!L[ent.id] || typeof L[ent.id].x !== 'number') {
+        L[ent.id] = ent.defaults ? ent.defaults() : { x: 0, y: 0 };
+      }
+      return L[ent.id];
     };
 
     // ---------- Dirty flag ----------
@@ -379,7 +445,9 @@ window.CanvasLevelEditor = (() => {
             .map((lvl) => {
               if (!lvl) return null;
               // If this looks like a raw level data blob, wrap it.
-              if (!lvl.data && (lvl.worldW || lvl.ballStart || lvl.hole || lvl.obstacles)) {
+              // v0.3: detect raw level-data blob via worldW, obstacles, or any registered point entity id.
+              const _peHas = POINT_ENTITIES.some(e => lvl[e.id]);
+              if (!lvl.data && (lvl.worldW || lvl.obstacles || _peHas)) {
                 lvl = { courtId: null, slot: null, data: lvl };
               }
               if (!lvl.data || typeof lvl.data !== 'object') return null;
@@ -463,7 +531,9 @@ window.CanvasLevelEditor = (() => {
         if (w && state.zoom) {
           insertX = Math.round(w.scrollLeft / state.zoom - LEFT_PAD + (w.clientWidth / state.zoom / 2));
         } else {
-          insertX = lvl.data.ballStart.x + 150;
+          // v0.3: fall back to first point-entity's x (legacy: ballStart) plus 150.
+          const _firstEnt = POINT_ENTITIES[0];
+          insertX = (_firstEnt ? pePos(lvl.data, _firstEnt).x : 100) + 150;
         }
         // Clamp to world bounds
         insertX = Math.max(0, Math.min(lvl.data.worldW - 50, insertX));
@@ -496,9 +566,10 @@ window.CanvasLevelEditor = (() => {
       state.pendingPrefab = prefab;
       // Default X to viewport center until mouse moves
       const w = document.getElementById('canvas-wrap');
+      const _firstEnt = POINT_ENTITIES[0];
       state.pendingPrefabX = w && state.zoom
         ? Math.round(w.scrollLeft / state.zoom - LEFT_PAD + w.clientWidth / state.zoom / 2)
-        : lvl.data.ballStart.x + 150;
+        : ((_firstEnt ? pePos(lvl.data, _firstEnt).x : 100) + 150);
       canvas.style.cursor = 'crosshair';
       // Show cancel bar
       let bar = document.getElementById('prefab-place-bar');
@@ -828,32 +899,42 @@ window.CanvasLevelEditor = (() => {
         });
       }
 
-      // Ball start
-      const bx = L.ballStart.x + LEFT_PAD;
-      const by = L.ballStart.y;
-      if (config.drawBall) {
-        config.drawBall(ctx, { x: bx, y: by }, state.zoom);
-      } else {
-        ctx.fillStyle = '#fff';
-        ctx.strokeStyle = '#222';
-        ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(bx, by, 14, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      }
-      if (state.selectedKind === 'ball') highlightRect(bx - 16, by - 16, 32, 32);
-
-      // Hole
-      const hx = L.hole.x + LEFT_PAD;
-      const hy = L.hole.y;
-      if (config.drawHole) {
-        config.drawHole(ctx, { x: hx, y: hy }, state.zoom);
-      } else {
-        ctx.fillStyle = '#222';
-        ctx.beginPath(); ctx.ellipse(hx, hy, 18, 6, 0, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = '#d83d3d';
-        ctx.fillRect(hx - 1, hy - 40, 2, 40);
-        ctx.beginPath(); ctx.moveTo(hx + 1, hy - 40); ctx.lineTo(hx + 20, hy - 32); ctx.lineTo(hx + 1, hy - 24); ctx.fill();
-      }
-      if (state.selectedKind === 'hole') highlightRect(hx - 20, hy - 42, 40, 48);
+      // v0.3: render registered point entities (e.g. ballStart, hole).
+      POINT_ENTITIES.forEach(ent => {
+        const pos = pePos(L, ent);
+        const sx = pos.x + LEFT_PAD;
+        const sy = pos.y;
+        const screenPos = { x: sx, y: sy };
+        // Per-entity draw or fall-through to legacy config.drawBall/drawHole hooks.
+        if (typeof ent.draw === 'function') {
+          ent.draw(ctx, screenPos, state.zoom);
+        } else if (ent.id === 'ballStart' && config.drawBall) {
+          config.drawBall(ctx, screenPos, state.zoom);
+        } else if (ent.id === 'hole' && config.drawHole) {
+          config.drawHole(ctx, screenPos, state.zoom);
+        } else if (ent.id === 'ballStart') {
+          ctx.fillStyle = '#fff';
+          ctx.strokeStyle = '#222';
+          ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.arc(sx, sy, 14, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        } else if (ent.id === 'hole') {
+          ctx.fillStyle = '#222';
+          ctx.beginPath(); ctx.ellipse(sx, sy, 18, 6, 0, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = '#d83d3d';
+          ctx.fillRect(sx - 1, sy - 40, 2, 40);
+          ctx.beginPath(); ctx.moveTo(sx + 1, sy - 40); ctx.lineTo(sx + 20, sy - 32); ctx.lineTo(sx + 1, sy - 24); ctx.fill();
+        } else {
+          // Generic dot fallback for arbitrary host point entities.
+          ctx.fillStyle = (ent.miniMap && ent.miniMap.color) || '#fff';
+          ctx.strokeStyle = '#222';
+          ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.arc(sx, sy, 10, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        }
+        if (state.selectedKind === ent.selectedKind && typeof ent.highlight === 'function') {
+          const r = ent.highlight(screenPos);
+          highlightRect(r[0], r[1], r[2], r[3]);
+        }
+      });
 
       // Smart-guide vertical line
       if (state.smartGuideX != null && state.drag) {
@@ -1063,10 +1144,14 @@ window.CanvasLevelEditor = (() => {
       const lvl = state.levels[state.currentIdx];
       if (!lvl) return null;
       const L = lvl.data;
-      const bx = L.ballStart.x + LEFT_PAD;
-      if (Math.hypot(x - bx, y - L.ballStart.y) < 18) return { kind: 'ball' };
-      const hx = L.hole.x + LEFT_PAD;
-      if (x > hx - 20 && x < hx + 20 && y > L.hole.y - 42 && y < L.hole.y + 8) return { kind: 'hole' };
+      // v0.3: dispatch hit-test to registered point entities (in declaration order).
+      for (const ent of POINT_ENTITIES) {
+        const pos = pePos(L, ent);
+        const screenPos = { x: pos.x + LEFT_PAD, y: pos.y };
+        if (typeof ent.hitTest === 'function' && ent.hitTest(screenPos, x, y)) {
+          return { kind: ent.selectedKind || ent.id, entityId: ent.id };
+        }
+      }
       // Use spatial index when populated; fall back to linear scan for safety
       if (_spatial.count > 0 && _spatial.levelRef === lvl) {
         const candidates = queryPoint(x, y);
@@ -1668,28 +1753,36 @@ window.CanvasLevelEditor = (() => {
       set('in-starShots-0', _ss[0] ?? '');
       set('in-starShots-1', _ss[1] ?? '');
       set('in-starShots-2', _ss[2] ?? '');
-      set('in-ballX', L.ballStart.x);
-      set('in-holeX', L.hole.x);
+      // v0.3: bind point-entity X coordinates via registry's formField.x mapping.
+      POINT_ENTITIES.forEach(ent => {
+        const fid = ent.formField && ent.formField.x;
+        if (fid) {
+          const pos = pePos(L, ent);
+          set(fid, pos.x);
+        }
+      });
       const ic = $('in-court');
       if (ic && ic !== document.activeElement) ic.value = lvl.courtId == null ? 'null' : String(lvl.courtId);
       set('in-slot', lvl.slot);
       const course = currentCourse();
-      const ballX = $('in-ballX');
-      if (ballX) {
-        if (course && course.rules && course.rules.ballStartX != null) {
-          if (L.ballStart.x !== course.rules.ballStartX) {
-            L.ballStart.x = course.rules.ballStartX;
-            set('in-ballX', L.ballStart.x);
-          }
-          ballX.readOnly = true;
-          ballX.title = `${course.name} rule: ballStart.x locked at ${course.rules.ballStartX}`;
-          ballX.style.opacity = '0.5';
+      // v0.3: course-rule lock for any registered point entity that declares a courseRule key
+      // (legacy: 'ballStartX' on first entity). Course.rules[ent.courseRule] = number locks ent.x.
+      POINT_ENTITIES.forEach(ent => {
+        if (!ent.courseRule || !ent.formField || !ent.formField.x) return;
+        const inp = $(ent.formField.x); if (!inp) return;
+        if (course && course.rules && course.rules[ent.courseRule] != null) {
+          const cur = peEnsure(L, ent);
+          const lockX = course.rules[ent.courseRule];
+          if (cur.x !== lockX) { cur.x = lockX; set(ent.formField.x, cur.x); }
+          inp.readOnly = true;
+          inp.title = `${course.name} rule: ${ent.id}.x locked at ${lockX}`;
+          inp.style.opacity = '0.5';
         } else {
-          ballX.readOnly = false;
-          ballX.title = '';
-          ballX.style.opacity = '';
+          inp.readOnly = false;
+          inp.title = '';
+          inp.style.opacity = '';
         }
-      }
+      });
       const cn = $('current-level-name');
       if (cn) cn.textContent = L.name || '(unnamed)';
       const wwd = $('world-width-display');
@@ -1720,8 +1813,15 @@ window.CanvasLevelEditor = (() => {
             L.starShots = sEl.value.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
           }
         }
-        L.ballStart.x = parseInt($('in-ballX').value) || 100;
-        L.hole.x = parseInt($('in-holeX').value) || 700;
+        // v0.3: write back point-entity X from registry inputs.
+        POINT_ENTITIES.forEach(ent => {
+          const fid = ent.formField && ent.formField.x;
+          if (!fid) return;
+          const el = $(fid); if (!el) return;
+          const cur = peEnsure(L, ent);
+          const fb = (ent.defaults ? ent.defaults().x : 0);
+          cur.x = parseInt(el.value) || fb;
+        });
         const c = $('in-court').value;
         lvl.courtId = c === 'null' ? null : parseInt(c, 10);
         const s = parseInt($('in-slot').value);
@@ -2466,21 +2566,18 @@ window.CanvasLevelEditor = (() => {
         }
         return;
       }
-      if (state.tool !== 'select' && state.tool !== 'ballStart' && state.tool !== 'hole') {
+      // v0.3: point-entity placement tools are dispatched via the registry.
+      const _toolEnt = PE_BY_TOOL[state.tool];
+      if (state.tool !== 'select' && !_toolEnt) {
         placeObstacle(state.tool, p.x, p.y);
         return;
       }
-      if (state.tool === 'ballStart') {
+      if (_toolEnt) {
         const lvl = state.levels[state.currentIdx]; if (!lvl) return;
         pushHistory(true);
-        lvl.data.ballStart.x = snap(p.x - LEFT_PAD);
-        lvl.data.ballStart.y = snap(p.y);
-        render(); return;
-      }
-      if (state.tool === 'hole') {
-        const lvl = state.levels[state.currentIdx]; if (!lvl) return;
-        pushHistory(true);
-        lvl.data.hole.x = snap(p.x - LEFT_PAD);
+        const cur = peEnsure(lvl.data, _toolEnt);
+        cur.x = snap(p.x - LEFT_PAD);
+        if (_toolEnt.dragAxis !== 'x') cur.y = snap(p.y);
         render(); return;
       }
       const h = hitTest(p.x, p.y);
@@ -2507,15 +2604,17 @@ window.CanvasLevelEditor = (() => {
       }
       const lvl = state.levels[state.currentIdx];
       let origX, origY;
-      if (h.kind === 'ball') { origX = lvl.data.ballStart.x; origY = lvl.data.ballStart.y; }
-      else if (h.kind === 'hole') { origX = lvl.data.hole.x; origY = lvl.data.hole.y; }
-      else {
+      const _hitEnt = h.entityId ? PE_BY_ID[h.entityId] : (h.kind ? PE_BY_KIND[h.kind] : null);
+      if (_hitEnt) {
+        const pos = pePos(lvl.data, _hitEnt);
+        origX = pos.x; origY = pos.y;
+      } else {
         const o = lvl.data.obstacles[h.index];
         origX = o.x ?? o.x1 ?? 0;
         origY = o.y ?? 0;
       }
       pushHistory(true);
-      state.drag = { kind: h.kind, index: h.index, startX: p.x, startY: p.y, origX, origY };
+      state.drag = { kind: h.kind, entityId: _hitEnt ? _hitEnt.id : null, index: h.index, startX: p.x, startY: p.y, origX, origY };
       render();
     });
 
@@ -2559,11 +2658,11 @@ window.CanvasLevelEditor = (() => {
         if (Math.abs(dx) > Math.abs(dy)) dy = 0;
         else dx = 0;
       }
-      if (state.drag.kind === 'ball') {
-        lvl.data.ballStart.x = snap(state.drag.origX + dx);
-        lvl.data.ballStart.y = snap(state.drag.origY + dy);
-      } else if (state.drag.kind === 'hole') {
-        lvl.data.hole.x = snap(state.drag.origX + dx);
+      const _dragEnt = state.drag.entityId ? PE_BY_ID[state.drag.entityId] : (state.drag.kind ? PE_BY_KIND[state.drag.kind] : null);
+      if (_dragEnt) {
+        const cur = peEnsure(lvl.data, _dragEnt);
+        cur.x = snap(state.drag.origX + dx);
+        if (_dragEnt.dragAxis !== 'x') cur.y = snap(state.drag.origY + dy);
       } else if (state.drag.kind === 'obs') {
         const ids = state.selectedObsList.length ? state.selectedObsList : [state.drag.index];
         const primary = lvl.data.obstacles[state.drag.index];
@@ -2775,9 +2874,9 @@ window.CanvasLevelEditor = (() => {
           { label: 'Delete', danger: true, run: deleteSelected }
         );
       } else if (h && h.kind === 'ball') {
-        items.push({ label: 'Scroll to ball', run: () => scrollTo(lvl.data.ballStart.x, lvl.data.ballStart.y) });
+        const _ballEnt = PE_BY_KIND['ball']; if (_ballEnt) { const pos = pePos(lvl.data, _ballEnt); items.push({ label: 'Scroll to ' + (_ballEnt.label || 'ball'), run: () => scrollTo(pos.x, pos.y) }); }
       } else if (h && h.kind === 'hole') {
-        items.push({ label: 'Scroll to hole', run: () => scrollTo(lvl.data.hole.x, lvl.data.hole.y) });
+        const _holeEnt = PE_BY_KIND['hole']; if (_holeEnt) { const pos = pePos(lvl.data, _holeEnt); items.push({ label: 'Scroll to ' + (_holeEnt.label || 'hole'), run: () => scrollTo(pos.x, pos.y) }); }
       } else {
         items.push(
           { label: clipboard ? `Paste ${clipboard[0]?.type || ''}` : 'Nothing to paste', disabled: !clipboard,
@@ -2919,10 +3018,11 @@ window.CanvasLevelEditor = (() => {
       const lvl = state.levels[state.currentIdx]; if (!lvl) return;
       if (!state.selectedKind) return;
       pushHistory();
-      if (state.selectedKind === 'ball') {
-        lvl.data.ballStart.x += dx; lvl.data.ballStart.y += dy;
-      } else if (state.selectedKind === 'hole') {
-        lvl.data.hole.x += dx;
+      const _selEnt = state.selectedKind ? PE_BY_KIND[state.selectedKind] : null;
+      if (_selEnt) {
+        const cur = peEnsure(lvl.data, _selEnt);
+        cur.x += dx;
+        if (_selEnt.dragAxis !== 'x') cur.y += dy;
       } else if (state.selectedKind === 'obs') {
         const ids = state.selectedObsList.length ? state.selectedObsList : [state.selectedObs];
         const yLocked = config.yLockedTypes || new Set(['hill','movingHill','trampoline','spring','portal']);
@@ -3005,8 +3105,9 @@ window.CanvasLevelEditor = (() => {
       // Tool shortcuts (before inField guard)
       if (!inField && e.key === '1') { e.preventDefault(); state.tool = 'select'; document.querySelectorAll('.asset-btn, .tool-btn').forEach(el => { el.classList.remove('active'); if (el.hasAttribute('aria-pressed')) el.setAttribute('aria-pressed', 'false'); }); document.querySelector('.tool-btn[data-tool="select"]')?.classList.add('active'); canvas.style.cursor = ''; saveSettings(); render(); return; }
       if (!inField && e.key === '2') { e.preventDefault(); state.tool = 'eraser'; document.querySelectorAll('.asset-btn, .tool-btn').forEach(el => { el.classList.remove('active'); if (el.hasAttribute('aria-pressed')) el.setAttribute('aria-pressed', 'false'); }); document.querySelector('.tool-btn[data-tool="eraser"]')?.classList.add('active'); canvas.style.cursor = 'crosshair'; saveSettings(); render(); return; }
-      if (!inField && e.key === '3' && SCHEMA['ballStart']) { e.preventDefault(); state.tool = 'ballStart'; saveSettings(); render(); return; }
-      if (!inField && e.key === '4') { e.preventDefault(); state.tool = 'hole'; saveSettings(); render(); return; }
+      // v0.3: numeric tool shortcuts for first two registered point entities (3=first, 4=second).
+      if (!inField && e.key === '3' && POINT_ENTITIES[0] && POINT_ENTITIES[0].toolKey) { e.preventDefault(); state.tool = POINT_ENTITIES[0].toolKey; saveSettings(); render(); return; }
+      if (!inField && e.key === '4' && POINT_ENTITIES[1] && POINT_ENTITIES[1].toolKey) { e.preventDefault(); state.tool = POINT_ENTITIES[1].toolKey; saveSettings(); render(); return; }
       if (!inField && (e.key === 'g' || e.key === 'G') && !mod) { e.preventDefault(); state.showGrid = !state.showGrid; const og = $('opt-grid'); if (og) og.checked = state.showGrid; saveSettings(); render(); return; }
       // Level reorder Alt+Arrow
       if (!inField && e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && state.currentIdx >= 0) {
@@ -3032,8 +3133,9 @@ window.CanvasLevelEditor = (() => {
       if (e.key === 'Delete' || e.key === 'Backspace') { deleteSelected(); e.preventDefault(); }
       if (e.key === 'Escape') { state.selectedKind = null; state.selectedObs = -1; state.selectedObsList = []; state.tool = 'select'; render(); }
       const lvl = state.levels[state.currentIdx];
-      if (lvl && e.key === 'Home') { e.preventDefault(); scrollTo(lvl.data.ballStart.x, lvl.data.ballStart.y); }
-      if (lvl && e.key === 'End')  { e.preventDefault(); scrollTo(lvl.data.hole.x, lvl.data.hole.y); }
+      // v0.3: Home/End scroll to first/last registered point entity (defaults: ball / hole).
+      if (lvl && e.key === 'Home' && POINT_ENTITIES[0]) { e.preventDefault(); const p0 = pePos(lvl.data, POINT_ENTITIES[0]); scrollTo(p0.x, p0.y); }
+      if (lvl && e.key === 'End'  && POINT_ENTITIES[POINT_ENTITIES.length-1]) { e.preventDefault(); const pN = pePos(lvl.data, POINT_ENTITIES[POINT_ENTITIES.length-1]); scrollTo(pN.x, pN.y); }
       if (e.key === 'f' || e.key === 'F') { e.preventDefault(); fitCanvas(); render(); toast('Fit to window'); }
       if (e.key === 'p' || e.key === 'P') { e.preventDefault(); playInGame(); }
       // NOTE: ruler has no keyboard shortcut in this embed.
@@ -3077,8 +3179,8 @@ window.CanvasLevelEditor = (() => {
         Object.assign(base.data, cloneDeep(tmpl.data));
         if (!base.data.name) base.data.name = tmpl.name || 'New Level';
         if (!Array.isArray(base.data.obstacles)) base.data.obstacles = [];
-        if (!base.data.ballStart) base.data.ballStart = { x: 100, y: GY - 30 };
-        if (!base.data.hole) base.data.hole = { x: 700, y: GY };
+        // v0.3: fill any registered point entity that's missing a position.
+        POINT_ENTITIES.forEach(ent => peEnsure(base.data, ent));
       }
       return base;
     };
@@ -3172,12 +3274,13 @@ window.CanvasLevelEditor = (() => {
       if (!Array.isArray(arr)) throw new Error('not an array');
       const valid = arr.filter(item => {
         try {
-          return Array.isArray(item.data?.obstacles) &&
-            typeof item.data?.name === 'string' &&
-            typeof item.data?.ballStart?.x === 'number' &&
-            typeof item.data?.ballStart?.y === 'number' &&
-            typeof item.data?.hole?.x === 'number' &&
-            typeof item.data?.hole?.y === 'number';
+          // v0.3: each registered point entity must have a {x:number, y:number} on level.data.
+          if (!Array.isArray(item.data?.obstacles) || typeof item.data?.name !== 'string') return false;
+          for (const ent of POINT_ENTITIES) {
+            const v = item.data?.[ent.id];
+            if (!v || typeof v.x !== 'number' || typeof v.y !== 'number') return false;
+          }
+          return true;
         } catch (_) { return false; }
       });
       const skipped = arr.length - valid.length;
@@ -3282,20 +3385,17 @@ window.CanvasLevelEditor = (() => {
           const course = COURSES[courseId];
           if (course && course.defaultLevel) {
             const def = cloneDeep(course.defaultLevel);
+            // v0.3: build base from host's levelDataDefaults (which may declare
+            // arbitrary point entities); then overlay course-specific defaults.
+            const baseData = Object.assign(
+              { name: course.name + ' — Starter', subtitle: '', worldW: 800, time: 0.3, obstacles: [] },
+              LEVEL_DATA_DEFAULTS()
+            );
+            POINT_ENTITIES.forEach(ent => peEnsure(baseData, ent));
             const lvl = {
               courtId: courseId,
               slot: null,
-              data: Object.assign({
-                name: course.name + ' — Starter',
-                subtitle: '',
-                worldW: 800,
-                time: 0.3,
-                ballStart: { x: 100, y: GY - 30 },
-                hole: { x: 700, y: GY },
-                maxShots: 4,
-                starShots: [2, 3, 4],
-                obstacles: []
-              }, def)
+              data: Object.assign(baseData, def)
             };
             state.levels.push(lvl);
             save();
@@ -3423,8 +3523,8 @@ window.CanvasLevelEditor = (() => {
     };
     const scrollToSelection = () => {
       const lvl = state.levels[state.currentIdx]; if (!lvl) return;
-      if (state.selectedKind === 'ball') scrollTo(lvl.data.ballStart.x, lvl.data.ballStart.y);
-      else if (state.selectedKind === 'hole') scrollTo(lvl.data.hole.x, lvl.data.hole.y);
+      const _selEnt2 = state.selectedKind ? PE_BY_KIND[state.selectedKind] : null;
+      if (_selEnt2) { const p = pePos(lvl.data, _selEnt2); scrollTo(p.x, p.y); }
       else if (state.selectedKind === 'obs' && state.selectedObs >= 0) {
         const o = lvl.data.obstacles[state.selectedObs];
         scrollTo(o.x ?? (o.x1 + (o.x2 - o.x1) / 2), o.y ?? GY);
@@ -3541,29 +3641,21 @@ window.CanvasLevelEditor = (() => {
           mmCtx.fillRect(cx - xw / 2, cy - yw / 2, xw, yw);
         }
       });
-      // Feature 1: Ball position — white dot
-      const ballMX = (L.ballStart.x + LEFT_PAD) * sx;
-      const ballMY = L.ballStart.y * sy;
-      mmCtx.save();
-      mmCtx.fillStyle = '#ffffff';
-      mmCtx.strokeStyle = 'rgba(0,0,0,0.5)';
-      mmCtx.lineWidth = 1;
-      mmCtx.beginPath();
-      mmCtx.arc(ballMX, ballMY, 3, 0, Math.PI * 2);
-      mmCtx.fill(); mmCtx.stroke();
-      mmCtx.restore();
-
-      // Feature 1: Hole position — red dot
-      const holeMX = (L.hole.x + LEFT_PAD) * sx;
-      const holeMY = L.hole.y * sy;
-      mmCtx.save();
-      mmCtx.fillStyle = '#d83d3d';
-      mmCtx.strokeStyle = 'rgba(0,0,0,0.5)';
-      mmCtx.lineWidth = 1;
-      mmCtx.beginPath();
-      mmCtx.arc(holeMX, holeMY, 3, 0, Math.PI * 2);
-      mmCtx.fill(); mmCtx.stroke();
-      mmCtx.restore();
+      // v0.3: render mini-map markers for all registered point entities.
+      POINT_ENTITIES.forEach(ent => {
+        const mm = ent.miniMap || { color: '#fff', radius: 3 };
+        const pos = pePos(L, ent);
+        const mx = (pos.x + LEFT_PAD) * sx;
+        const my = pos.y * sy;
+        mmCtx.save();
+        mmCtx.fillStyle = mm.color || '#fff';
+        mmCtx.strokeStyle = 'rgba(0,0,0,0.5)';
+        mmCtx.lineWidth = 1;
+        mmCtx.beginPath();
+        mmCtx.arc(mx, my, mm.radius || 3, 0, Math.PI * 2);
+        mmCtx.fill(); mmCtx.stroke();
+        mmCtx.restore();
+      });
 
       // Feature 1: Viewport indicator — yellow rect
       const w = wrapEl();

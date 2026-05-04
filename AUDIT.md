@@ -2,7 +2,11 @@
 
 Goal of canvas-level-editor: a generic 2D level editor that any browser-game project can host via a plugin.
 
-> **Phase 1 status (v0.2.0, 2026-05-03):** ~20 of 80 references extracted via `config.leftPad`, `config.levelDataDefaults`, `config.themeDefaults`, `config.thumbnailThemes`, `config.migrationFields`. Remaining ~60 (point-entity hit-test, drag, property-panel fieldset, course-rule lookups, keyboard tools) deferred to v0.3 — they require a `pointEntities` registry which still needs design + tests. See CHANGELOG 0.2.0.
+> **Phase 2 status (v0.3.0, 2026-05-03):** point-entity registry + per-axis padding shipped. All runtime `lvl.data.ballStart` / `lvl.data.hole` access has been replaced with `config.pointEntities` registry dispatch (hit-test, drag, mini-map, keyboard nudge, scroll-to-selection, paste-fallback, raw-data wrap detection, import validation, property-panel form binding, course-rule lock, default-scene bootstrap). Remaining ~12 references are comments, the internal default-registry literal (only used when host omits `pointEntities`), and the `LEVEL_DATA_DEFAULTS` legacy fallback block — none are runtime field access. See CHANGELOG 0.3.0.
+>
+> **Deferred to v0.4:** declarative property-panel form generation. The registry now describes the binding (`entity.formField.x`), but `<input id="in-ballX">` elements still live in host HTML (`editor.html`). Likewise `maxShots` / `starShots` inputs are still golf-named in both host HTML and the `wireConfig` write block.
+>
+> **Phase 1 status (v0.2.0, 2026-05-03):** ~20 of 80 references extracted via `config.leftPad`, `config.levelDataDefaults`, `config.themeDefaults`, `config.thumbnailThemes`, `config.migrationFields`. See CHANGELOG 0.2.0.
 
 ## Status
 
