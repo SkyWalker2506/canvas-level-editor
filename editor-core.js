@@ -52,6 +52,16 @@ window.CanvasLevelEditor = (() => {
   //                                     miniMap, draw, dragAxis, formField, courseRule } singleton
   //                         entities (one instance per level, stored at level.data[id]). Replaces hardcoded
   //                         ballStart / hole field access for hit-test, drag, keyboard, mini-map, property panel.
+  //
+  // v0.4 schema-descriptor options (all optional):
+  //   formSchema          — array of { id, label, type:'number'|'text'|'select', min?, max?, step?,
+  //                                     options?, bindTo: 'level.data.maxShots' (dotted path, supports [n]),
+  //                                     group?, placeholder?, default? } describing every non-entity
+  //                         level-data input. Engine drives bindConfig/wireConfig from this list — no
+  //                         hardcoded maxShots/starShots strings. Combined with `pointEntities[].formField`
+  //                         this is sufficient for `EditorCore.renderPropertyPanel(container)` to generate
+  //                         the entire form HTML so the host no longer hardcodes `<input id="in-maxShots">` etc.
+  //   pointEntities[].formField.y — optional input id binding the entity's Y coordinate.
 
   // ---------- Config validation ----------
   const validateConfig = (config) => {
@@ -169,6 +179,58 @@ window.CanvasLevelEditor = (() => {
             formField: { x: 'in-holeX' }
           }
         ];
+    // ---------- v0.4: formSchema (declarative property-panel form) ----------
+    // Each entry: { id, label, type:'number'|'text'|'select', min?, max?, step?,
+    //              options?, bindTo: 'level.data.maxShots' or 'level.data.starShots[0]',
+    //              group?, placeholder?, default? }. Resolves the last hardcoded
+    //              maxShots/starShots references in bindConfig/wireConfig.
+    const FORM_SCHEMA = Array.isArray(config.formSchema) ? config.formSchema : [];
+    const FORM_SCHEMA_BY_ID = Object.fromEntries(FORM_SCHEMA.map(f => [f.id, f]));
+    // Resolve a dotted path like 'level.data.starShots[0]' against a context object.
+    const _resolvePath = (root, path) => {
+      // split into tokens: words and [n]
+      const tokens = [];
+      const re = /([^.\[\]]+)|\[(\d+)\]/g;
+      let m;
+      while ((m = re.exec(path))) tokens.push(m[1] != null ? m[1] : Number(m[2]));
+      let obj = root, parent = null, key = null;
+      for (let i = 0; i < tokens.length; i++) {
+        parent = obj; key = tokens[i];
+        if (obj == null) return { parent: null, key: null, value: undefined };
+        obj = obj[key];
+      }
+      return { parent, key, value: obj };
+    };
+    const _readPath = (root, path) => _resolvePath(root, path).value;
+    const _writePath = (root, path, value) => {
+      const tokens = [];
+      const re = /([^.\[\]]+)|\[(\d+)\]/g;
+      let m;
+      while ((m = re.exec(path))) tokens.push(m[1] != null ? m[1] : Number(m[2]));
+      if (!tokens.length) return false;
+      let obj = root;
+      for (let i = 0; i < tokens.length - 1; i++) {
+        const k = tokens[i];
+        if (obj[k] == null) {
+          // Auto-create if next token is numeric → array, else object
+          obj[k] = (typeof tokens[i + 1] === 'number') ? [] : {};
+        }
+        obj = obj[k];
+      }
+      obj[tokens[tokens.length - 1]] = value;
+      return true;
+    };
+    const _coerceFormValue = (raw, field) => {
+      if (field.type === 'number') {
+        const n = parseFloat(raw);
+        if (isNaN(n)) return field.default != null ? field.default : 0;
+        return (field.step && field.step >= 1 && Number.isInteger(field.step)) ? Math.round(n) : n;
+      }
+      return raw;
+    };
+    // Map every input id that formSchema covers — used to skip legacy hardcoded writes.
+    const _FORM_HANDLED_IDS = new Set(FORM_SCHEMA.map(f => f.id));
+
     const PE_BY_ID         = Object.fromEntries(POINT_ENTITIES.map(e => [e.id, e]));
     const PE_BY_TOOL       = Object.fromEntries(POINT_ENTITIES.filter(e => e.toolKey).map(e => [e.toolKey, e]));
     const PE_BY_KIND       = Object.fromEntries(POINT_ENTITIES.filter(e => e.selectedKind).map(e => [e.selectedKind, e]));
@@ -1734,7 +1796,18 @@ window.CanvasLevelEditor = (() => {
         if (el && el !== document.activeElement) el.value = v ?? '';
       };
       if (!lvl) {
-        ['in-name','in-subtitle','in-description','in-worldW','in-time','in-maxShots','in-starShots','in-starShots-0','in-starShots-1','in-starShots-2','in-ballX','in-holeX','in-slot'].forEach(id => set(id, ''));
+        const _clearIds = new Set([
+          'in-name','in-subtitle','in-description','in-worldW','in-time',
+          'in-maxShots','in-starShots','in-starShots-0','in-starShots-1','in-starShots-2',
+          'in-slot'
+        ]);
+        FORM_SCHEMA.forEach(f => { if (f.id) _clearIds.add(f.id); });
+        POINT_ENTITIES.forEach(ent => {
+          const ff = ent.formField || {};
+          if (ff.x) _clearIds.add(ff.x);
+          if (ff.y) _clearIds.add(ff.y);
+        });
+        _clearIds.forEach(id => set(id, ''));
         const ic = $('in-court');
         if (ic && ic !== document.activeElement) ic.value = 'null';
         const cn = $('current-level-name');
@@ -1747,19 +1820,27 @@ window.CanvasLevelEditor = (() => {
       set('in-description', L.description || '');
       set('in-worldW', L.worldW);
       set('in-time', L.time);
-      set('in-maxShots', L.maxShots);
-      set('in-starShots', (L.starShots || []).join(','));
+      // v0.4: read maxShots/starShots/etc via FORM_SCHEMA bindTo paths.
+      // Legacy hardcoded sets only run when their id isn't covered by formSchema.
+      const _bindCtx = { level: lvl };
+      if (!_FORM_HANDLED_IDS.has('in-maxShots')) set('in-maxShots', L.maxShots);
+      if (!_FORM_HANDLED_IDS.has('in-starShots')) set('in-starShots', (L.starShots || []).join(','));
       const _ss = L.starShots || [];
-      set('in-starShots-0', _ss[0] ?? '');
-      set('in-starShots-1', _ss[1] ?? '');
-      set('in-starShots-2', _ss[2] ?? '');
-      // v0.3: bind point-entity X coordinates via registry's formField.x mapping.
+      if (!_FORM_HANDLED_IDS.has('in-starShots-0')) set('in-starShots-0', _ss[0] ?? '');
+      if (!_FORM_HANDLED_IDS.has('in-starShots-1')) set('in-starShots-1', _ss[1] ?? '');
+      if (!_FORM_HANDLED_IDS.has('in-starShots-2')) set('in-starShots-2', _ss[2] ?? '');
+      // v0.4: drive formSchema-bound inputs from their bindTo paths.
+      FORM_SCHEMA.forEach(field => {
+        if (!field.bindTo) return;
+        const v = _readPath(_bindCtx, field.bindTo);
+        set(field.id, v == null ? '' : v);
+      });
+      // v0.3/v0.4: bind point-entity X (and optional Y) via registry's formField mapping.
       POINT_ENTITIES.forEach(ent => {
-        const fid = ent.formField && ent.formField.x;
-        if (fid) {
-          const pos = pePos(L, ent);
-          set(fid, pos.x);
-        }
+        const ff = ent.formField || {};
+        const pos = pePos(L, ent);
+        if (ff.x) set(ff.x, pos.x);
+        if (ff.y) set(ff.y, pos.y);
       });
       const ic = $('in-court');
       if (ic && ic !== document.activeElement) ic.value = lvl.courtId == null ? 'null' : String(lvl.courtId);
@@ -1802,8 +1883,15 @@ window.CanvasLevelEditor = (() => {
         L.worldW = Math.max(400, Math.min(8000, parseInt($('in-worldW').value) || 800));
         if (L.worldW > 3000) toast('⚠ World width ' + L.worldW + 'px is large — may cause slow rendering', 3000);
         L.time = parseFloat($('in-time').value) || 0;
-        L.maxShots = parseInt($('in-maxShots').value) || 4;
-        {
+        // v0.4: legacy hardcoded writes only run if formSchema doesn't claim the id.
+        if (!_FORM_HANDLED_IDS.has('in-maxShots')) {
+          const ms = $('in-maxShots');
+          if (ms) L.maxShots = parseInt(ms.value) || 4;
+        }
+        if (!_FORM_HANDLED_IDS.has('in-starShots-0') &&
+            !_FORM_HANDLED_IDS.has('in-starShots-1') &&
+            !_FORM_HANDLED_IDS.has('in-starShots-2') &&
+            !_FORM_HANDLED_IDS.has('in-starShots')) {
           const sEl = $('in-starShots');
           const sSplit = ['in-starShots-0','in-starShots-1','in-starShots-2'].map(id => $(id));
           if (sSplit.every(el => el)) {
@@ -1813,14 +1901,37 @@ window.CanvasLevelEditor = (() => {
             L.starShots = sEl.value.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
           }
         }
-        // v0.3: write back point-entity X from registry inputs.
+        // v0.4: write formSchema fields via bindTo path resolution.
+        const _wireCtx = { level: lvl };
+        FORM_SCHEMA.forEach(field => {
+          if (!field.bindTo) return;
+          const el = $(field.id); if (!el) return;
+          const coerced = _coerceFormValue(el.value, field);
+          _writePath(_wireCtx, field.bindTo, coerced);
+        });
+        // v0.4: keep aggregate `in-starShots` text input in sync if both split + aggregate exist.
+        if (Array.isArray(L.starShots)) {
+          const aggEl = $('in-starShots');
+          if (aggEl && document.activeElement !== aggEl) aggEl.value = L.starShots.filter(n => Number.isFinite(n)).join(',');
+        }
+        // v0.3/v0.4: write back point-entity X (and Y) from registry inputs.
         POINT_ENTITIES.forEach(ent => {
-          const fid = ent.formField && ent.formField.x;
-          if (!fid) return;
-          const el = $(fid); if (!el) return;
+          const ff = ent.formField || {};
           const cur = peEnsure(L, ent);
-          const fb = (ent.defaults ? ent.defaults().x : 0);
-          cur.x = parseInt(el.value) || fb;
+          if (ff.x) {
+            const el = $(ff.x);
+            if (el) {
+              const fb = (ent.defaults ? ent.defaults().x : 0);
+              cur.x = parseInt(el.value) || fb;
+            }
+          }
+          if (ff.y) {
+            const el = $(ff.y);
+            if (el) {
+              const fb = (ent.defaults ? ent.defaults().y : 0);
+              cur.y = parseInt(el.value) || fb;
+            }
+          }
         });
         const c = $('in-court').value;
         lvl.courtId = c === 'null' ? null : parseInt(c, 10);
@@ -1829,8 +1940,92 @@ window.CanvasLevelEditor = (() => {
         slotWarning();
         render();
       };
-      ['in-name','in-subtitle','in-description','in-worldW','in-time','in-maxShots','in-starShots','in-starShots-0','in-starShots-1','in-starShots-2','in-ballX','in-holeX','in-court','in-slot']
-        .forEach(id => { const el = $(id); if (el) el.addEventListener('input', upd); });
+      // v0.4: assemble the input id list dynamically — legacy fixed ids + formSchema ids
+      // + every point-entity formField.x/y. Deduped.
+      const _wireIds = new Set([
+        'in-name','in-subtitle','in-description','in-worldW','in-time',
+        'in-maxShots','in-starShots','in-starShots-0','in-starShots-1','in-starShots-2',
+        'in-court','in-slot'
+      ]);
+      FORM_SCHEMA.forEach(f => { if (f.id) _wireIds.add(f.id); });
+      POINT_ENTITIES.forEach(ent => {
+        const ff = ent.formField || {};
+        if (ff.x) _wireIds.add(ff.x);
+        if (ff.y) _wireIds.add(ff.y);
+      });
+      _wireIds.forEach(id => { const el = $(id); if (el) el.addEventListener('input', upd); });
+    };
+
+    // ---------- v0.4: declarative property-panel form generator ----------
+    // Builds labeled inputs from FORM_SCHEMA (grouped) + POINT_ENTITIES formField mappings.
+    // Container is left untouched if (a) no formSchema/pointEntities, or (b) container
+    // already has any <input>/<select>/<textarea> children (host opted out by hand-rolling).
+    const renderPropertyPanel = (containerEl) => {
+      if (!containerEl) return false;
+      const hasNoSchema = !FORM_SCHEMA.length && !POINT_ENTITIES.length;
+      if (hasNoSchema) return false;
+      const hasExisting = containerEl.querySelector('input, select, textarea');
+      if (hasExisting) return false; // backward compat: host pre-populated the container
+
+      // Bucket schema entries by group; preserve declaration order within each group.
+      const groups = new Map();
+      const groupOrder = [];
+      const pushTo = (groupName, item) => {
+        if (!groups.has(groupName)) { groups.set(groupName, []); groupOrder.push(groupName); }
+        groups.get(groupName).push(item);
+      };
+      FORM_SCHEMA.forEach(f => pushTo(f.group || 'Level Settings', { kind: 'schema', field: f }));
+      POINT_ENTITIES.forEach(ent => {
+        const ff = ent.formField || {};
+        if (ff.x) pushTo(ent.formGroup || 'Level Settings',
+          { kind: 'entity', ent, axis: 'x', inputId: ff.x, label: `${ent.label || ent.id} X` });
+        if (ff.y) pushTo(ent.formGroup || 'Level Settings',
+          { kind: 'entity', ent, axis: 'y', inputId: ff.y, label: `${ent.label || ent.id} Y` });
+      });
+
+      const escAttr = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+      const renderField = (id, label, type, attrs) => {
+        const a = Object.entries(attrs || {})
+          .filter(([k, v]) => k[0] !== '_' && v != null && v !== '')
+          .map(([k, v]) => `${k}="${escAttr(v)}"`)
+          .join(' ');
+        if (type === 'select' && Array.isArray(attrs && attrs._options)) {
+          const opts = attrs._options.map(o =>
+            `<option value="${escAttr(o.value)}">${escAttr(o.label != null ? o.label : o.value)}</option>`
+          ).join('');
+          return `<div><label>${escAttr(label)}</label><select id="${escAttr(id)}">${opts}</select></div>`;
+        }
+        return `<div><label>${escAttr(label)}</label><input id="${escAttr(id)}" type="${escAttr(type)}" ${a} /></div>`;
+      };
+
+      const html = groupOrder.map(g => {
+        const items = groups.get(g);
+        const rows = items.map(it => {
+          if (it.kind === 'schema') {
+            const f = it.field;
+            const t = f.type === 'text' ? 'text' : (f.type === 'select' ? 'select' : 'number');
+            return renderField(f.id, f.label || f.id, t, {
+              min: f.min, max: f.max, step: f.step,
+              placeholder: f.placeholder,
+              _options: f.options
+            });
+          }
+          // entity X/Y
+          const e = it.ent;
+          const min = e.formMin && e.formMin[it.axis];
+          const max = e.formMax && e.formMax[it.axis];
+          const step = (e.formStep && e.formStep[it.axis]) || 5;
+          return renderField(it.inputId, it.label, 'number', { min, max, step });
+        });
+        // Pair up into 2-column rows for compact layout
+        const blocks = [];
+        for (let i = 0; i < rows.length; i += 2) {
+          blocks.push(`<div class="form-row-2col">${rows[i] || ''}${rows[i+1] || ''}</div>`);
+        }
+        return `<section class="panel"><h3>${escAttr(g)}</h3>${blocks.join('')}</section>`;
+      }).join('');
+      containerEl.innerHTML = html;
+      return true;
     };
 
     const slotWarning = () => {
@@ -3928,6 +4123,15 @@ window.CanvasLevelEditor = (() => {
       if (e.target.id === 'help-overlay') { const h = $('help-overlay'); if (h) h.style.display = 'none'; }
     });
     renderPalette();
+    // v0.4: if host declared a propertyPanelHost, generate the form BEFORE wireConfig
+    // so the freshly created inputs receive their `input` listeners on the same pass.
+    // Hosts that call `editor.renderPropertyPanel(el)` from outside *after* `create()`
+    // should also call `editor.rewireConfig()` (exposed below) to re-attach listeners.
+    try {
+      const ph = config.propertyPanelHost;
+      const phEl = (typeof ph === 'string') ? document.getElementById(ph) : ph;
+      if (phEl) renderPropertyPanel(phEl);
+    } catch (e) { console.warn('[CanvasLevelEditor] renderPropertyPanel(propertyPanelHost) failed', e); }
     wireConfig();
 
     // ---------- Feature 2 (Run 2): Find & Replace obstacle positions ----------
@@ -4588,7 +4792,8 @@ window.CanvasLevelEditor = (() => {
       registerCommand,
       openCommandPalette,
       exportPNG,
-      shareLink
+      shareLink,
+      renderPropertyPanel
     };
   }; // end create()
 

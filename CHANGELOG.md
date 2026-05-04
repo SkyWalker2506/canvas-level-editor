@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.4.0 — 2026-05-04 — declarative property-panel form (phase 3)
+
+### Added
+- `config.formSchema` — array of `{ id, label, type:'number'|'text'|'select', min?, max?, step?, options?, bindTo: 'level.data.maxShots' (dotted path, supports `[n]` for arrays), group?, placeholder?, default? }`. Engine drives `bindConfig` reads + `wireConfig` writes from this list — the last hardcoded `maxShots`/`starShots` strings are gone from runtime read/write paths in `editor-core.js`.
+- `config.pointEntities[].formField.y` — optional input id binding the entity's Y coordinate (was X-only in v0.3).
+- `EditorCore.renderPropertyPanel(containerEl)` — generates labeled form HTML from `formSchema` + `pointEntities[].formField.x/y` into the host container. Replaces the hand-rolled `<input id="in-maxShots">` / `<input id="in-ballX">` etc. that used to live in the host's `editor.html`. Backward-compat: skipped silently if the container already has any `<input>/<select>/<textarea>` children, so hosts that haven't migrated keep working unchanged.
+
+### Changed
+- `bindConfig` reads `level.data.maxShots` / `level.data.starShots[*]` (and any other formSchema field) via dotted-path resolution against `{ level }` instead of fixed property access.
+- `wireConfig` writes the same fields back via `_writePath` (auto-creates intermediate arrays/objects when missing) and only falls through to the legacy hardcoded write block when the corresponding ids are NOT declared in `formSchema` (back-compat).
+- The wireConfig listener-attach + empty-state clear lists are now assembled dynamically from formSchema + pointEntities, so adding a new field to formSchema automatically wires its `input` listener and clear-on-empty-state behavior.
+
+### Backwards compatibility
+- `formSchema` is optional. When omitted, the engine falls back to the legacy `in-maxShots` / `in-starShots-{0,1,2}` hardcoded read/write block exactly as in v0.3 — existing hosts that still hand-roll their HTML (and don't pass `formSchema`) keep working unchanged.
+- `renderPropertyPanel` is a no-op when the target container already has form inputs.
+
+### Host (golf-paper-craft) migration
+- `editor-plugin.js` now declares `formSchema` for `maxShots` + `starShots[0..2]` and calls `editor.renderPropertyPanel(document.getElementById('generated-level-settings'))`.
+- `editor.html` — removed the hardcoded `<input id="in-maxShots">`, `<input id="in-starShots-0..2">`, `<input id="in-ballX">`, `<input id="in-holeX">` blocks; replaced with a single `<div id="generated-level-settings">` mount point.
+
+### Deferred to v0.5
+- Hardcoded `name` / `subtitle` / `description` / `worldW` / `time` inputs still live in host HTML and `bindConfig` still reads them via fixed `in-name` etc. ids. Migrating these to `formSchema` is mechanical but kept out of v0.4 to keep the change focused on the AUDIT-flagged `maxShots`/`starShots`/`ballX`/`holeX` set.
+- `Course Assignment` (`in-court` / `in-slot` + `slot-warning`) still lives as host HTML — these are slot/course meta, not pure `level.data` fields, and likely belong in a sibling `metaSchema` config in v0.5.
+- `LEVEL_DATA_DEFAULTS` legacy fallback block still has golf-named keys; will be removed once the engine treats `levelDataDefaults` as required when `formSchema` is supplied.
+
+### Result
+Pre (v0.3): `editor-core.js` referenced `in-maxShots`, `in-starShots`, `in-starShots-0..2`, `in-ballX`, `in-holeX` literally in `bindConfig`/`wireConfig` runtime read/write paths.
+Post (v0.4): zero hardcoded form-input id strings drive the runtime read/write paths when `formSchema` is supplied. Legacy `in-maxShots`/`in-starShots*` strings remain only as opt-in fallbacks gated by `_FORM_HANDLED_IDS`. Host can drive the entire Level Settings form declaratively.
+
 ## 0.3.0 — 2026-05-03 — point-entity registry + per-axis padding (phase 2)
 
 ### Added

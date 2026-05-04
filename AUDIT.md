@@ -1,10 +1,12 @@
-# Golf-Specific Leakage Audit (2026-05-03)
+# Golf-Specific Leakage Audit (2026-05-04)
 
 Goal of canvas-level-editor: a generic 2D level editor that any browser-game project can host via a plugin.
 
-> **Phase 2 status (v0.3.0, 2026-05-03):** point-entity registry + per-axis padding shipped. All runtime `lvl.data.ballStart` / `lvl.data.hole` access has been replaced with `config.pointEntities` registry dispatch (hit-test, drag, mini-map, keyboard nudge, scroll-to-selection, paste-fallback, raw-data wrap detection, import validation, property-panel form binding, course-rule lock, default-scene bootstrap). Remaining ~12 references are comments, the internal default-registry literal (only used when host omits `pointEntities`), and the `LEVEL_DATA_DEFAULTS` legacy fallback block — none are runtime field access. See CHANGELOG 0.3.0.
+> **Phase 3 status (v0.4.0, 2026-05-04):** declarative `formSchema` + `EditorCore.renderPropertyPanel(container)` shipped. The last hardcoded `in-maxShots` / `in-starShots` runtime reads/writes in `bindConfig`/`wireConfig` have been replaced with dotted-path resolution (`level.data.maxShots`, `level.data.starShots[0]`). Host HTML now declares only a `<div id="generated-level-settings">` mount point — the engine generates labeled inputs from the schema. Legacy hardcoded write block remains opt-in gated by `_FORM_HANDLED_IDS` for backwards compat. See CHANGELOG 0.4.0.
 >
-> **Deferred to v0.4:** declarative property-panel form generation. The registry now describes the binding (`entity.formField.x`), but `<input id="in-ballX">` elements still live in host HTML (`editor.html`). Likewise `maxShots` / `starShots` inputs are still golf-named in both host HTML and the `wireConfig` write block.
+> **Deferred to v0.5:** migrate `name` / `subtitle` / `description` / `worldW` / `time` to `formSchema` (currently still hardcoded `in-name` etc. in `bindConfig`); migrate `in-court` / `in-slot` + `slot-warning` widget to a sibling `metaSchema` config; remove `LEVEL_DATA_DEFAULTS` golf-named legacy fallback once `levelDataDefaults` is treated as required when `formSchema` is supplied.
+>
+> **Phase 2 status (v0.3.0, 2026-05-03):** point-entity registry + per-axis padding shipped. All runtime `lvl.data.ballStart` / `lvl.data.hole` access has been replaced with `config.pointEntities` registry dispatch (hit-test, drag, mini-map, keyboard nudge, scroll-to-selection, paste-fallback, raw-data wrap detection, import validation, property-panel form binding, course-rule lock, default-scene bootstrap). See CHANGELOG 0.3.0.
 >
 > **Phase 1 status (v0.2.0, 2026-05-03):** ~20 of 80 references extracted via `config.leftPad`, `config.levelDataDefaults`, `config.themeDefaults`, `config.thumbnailThemes`, `config.migrationFields`. See CHANGELOG 0.2.0.
 
