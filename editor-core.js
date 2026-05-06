@@ -291,6 +291,8 @@ window.CanvasLevelEditor = (() => {
       _worldResizeDrag: null,
       _obsResizeHover: null,
       _obsResizeDrag: null,
+      _groundYHover: false,
+      _groundYDrag: null,
       pasteOffset: config.pasteOffset ?? 20,
       _pasteCount: 0,
       _lastClipboardKey: null,
@@ -1098,6 +1100,34 @@ window.CanvasLevelEditor = (() => {
         ctx.restore();
       }
 
+      // Ground-Y drag handle — horizontal line at per-level groundY
+      {
+        const gY = L.groundY != null ? L.groundY : GY;
+        const worldW = L.worldW + LEFT_PAD * 2;
+        ctx.save();
+        ctx.shadowColor = 'transparent';
+        const hov = state._groundYHover || state._groundYDrag;
+        ctx.strokeStyle = hov ? 'rgba(0,200,80,0.9)' : 'rgba(0,160,60,0.45)';
+        ctx.lineWidth = hov ? 2.5 : 1.5;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath(); ctx.moveTo(0, gY); ctx.lineTo(worldW, gY); ctx.stroke();
+        ctx.setLineDash([]);
+        // Grip knob on left
+        ctx.fillStyle = hov ? 'rgba(0,220,90,0.9)' : 'rgba(0,180,70,0.55)';
+        ctx.beginPath(); ctx.arc(LEFT_PAD / 2, gY, 7, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 8px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('↕', LEFT_PAD / 2, gY);
+        ctx.textBaseline = 'alphabetic';
+        // Label
+        ctx.fillStyle = hov ? 'rgba(0,180,60,1)' : 'rgba(0,140,50,0.7)';
+        ctx.font = '10px sans-serif'; ctx.textAlign = 'left';
+        ctx.fillText('GY=' + Math.round(gY), LEFT_PAD / 2 + 12, gY - 3);
+        ctx.restore();
+      }
+
       // Ruler overlay — tick marks along top and left edges
       if (state.showRuler) {
         const RULER_W = 20; // ruler strip width in world px
@@ -1799,7 +1829,8 @@ window.CanvasLevelEditor = (() => {
         const _clearIds = new Set([
           'in-name','in-subtitle','in-description','in-worldW','in-time',
           'in-maxShots','in-starShots','in-starShots-0','in-starShots-1','in-starShots-2',
-          'in-slot'
+          'in-slot',
+          'in-groundY','in-rocksDensity','in-rootsDensity'
         ]);
         FORM_SCHEMA.forEach(f => { if (f.id) _clearIds.add(f.id); });
         POINT_ENTITIES.forEach(ent => {
@@ -1820,6 +1851,9 @@ window.CanvasLevelEditor = (() => {
       set('in-description', L.description || '');
       set('in-worldW', L.worldW);
       set('in-time', L.time);
+      set('in-groundY', L.groundY != null ? L.groundY : GY);
+      set('in-rocksDensity', L.rocksDensity != null ? L.rocksDensity : 1);
+      set('in-rootsDensity', L.rootsDensity != null ? L.rootsDensity : 1);
       // v0.4: read maxShots/starShots/etc via FORM_SCHEMA bindTo paths.
       // Legacy hardcoded sets only run when their id isn't covered by formSchema.
       const _bindCtx = { level: lvl };
@@ -1883,6 +1917,12 @@ window.CanvasLevelEditor = (() => {
         L.worldW = Math.max(400, Math.min(8000, parseInt($('in-worldW').value) || 800));
         if (L.worldW > 3000) toast('⚠ World width ' + L.worldW + 'px is large — may cause slow rendering', 3000);
         L.time = parseFloat($('in-time').value) || 0;
+        const gyEl = $('in-groundY');
+        if (gyEl) L.groundY = Math.max(100, Math.min(500, parseInt(gyEl.value) || GY));
+        const rdEl = $('in-rocksDensity');
+        if (rdEl) L.rocksDensity = Math.max(0, Math.min(1, parseFloat(rdEl.value)));
+        const roDEl = $('in-rootsDensity');
+        if (roDEl) L.rootsDensity = Math.max(0, Math.min(1, parseFloat(roDEl.value)));
         // v0.4: legacy hardcoded writes only run if formSchema doesn't claim the id.
         if (!_FORM_HANDLED_IDS.has('in-maxShots')) {
           const ms = $('in-maxShots');
@@ -1945,7 +1985,8 @@ window.CanvasLevelEditor = (() => {
       const _wireIds = new Set([
         'in-name','in-subtitle','in-description','in-worldW','in-time',
         'in-maxShots','in-starShots','in-starShots-0','in-starShots-1','in-starShots-2',
-        'in-court','in-slot'
+        'in-court','in-slot',
+        'in-groundY','in-rocksDensity','in-rootsDensity'
       ]);
       FORM_SCHEMA.forEach(f => { if (f.id) _wireIds.add(f.id); });
       POINT_ENTITIES.forEach(ent => {
@@ -2644,6 +2685,15 @@ window.CanvasLevelEditor = (() => {
       return Math.abs(p.x - hx) <= 6;
     };
 
+    const nearGroundYHandle = (p) => {
+      const lvl = state.levels[state.currentIdx]; if (!lvl) return false;
+      const gY = lvl.data.groundY != null ? lvl.data.groundY : GY;
+      // Hit on the knob or within 6px of the line in left quarter of canvas
+      const onKnob = Math.hypot(p.x - LEFT_PAD / 2, p.y - gY) <= 10;
+      const onLine = Math.abs(p.y - gY) <= 5 && p.x < LEFT_PAD * 3;
+      return onKnob || onLine;
+    };
+
     const getSelectedObstacle = () => {
       const lvl = state.levels[state.currentIdx]; if (!lvl) return null;
       if (state.selectedKind !== 'obs' || state.selectedObs < 0) return null;
@@ -2709,14 +2759,25 @@ window.CanvasLevelEditor = (() => {
         resizeCanvas(); scheduleRender();
         e.stopPropagation(); return;
       }
+      if (state._groundYDrag) {
+        const p = canvasPt(e);
+        const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+        const newGY = Math.max(100, Math.min(500, snap(Math.round(p.y))));
+        lvl.data.groundY = newGY;
+        const el = $('in-groundY'); if (el && document.activeElement !== el) el.value = newGY;
+        scheduleRender();
+        e.stopPropagation(); return;
+      }
       const p = canvasPt(e);
       const hover = nearWorldResizeHandle(p);
       const oh = obsResizeHandleAt(p);
-      const wantCursor = hover ? 'ew-resize' : (oh?.handle?.cursor || (oh ? 'ew-resize' : ''));
+      const gyHov = nearGroundYHandle(p);
+      const wantCursor = hover ? 'ew-resize' : (gyHov ? 'ns-resize' : (oh?.handle?.cursor || (oh ? 'ew-resize' : '')));
       const cursorChanged = canvas.style.cursor !== wantCursor;
-      const hoverChanged = (hover !== state._worldResizeHover) || ((!!oh) !== (!!state._obsResizeHover));
+      const hoverChanged = (hover !== state._worldResizeHover) || ((!!oh) !== (!!state._obsResizeHover)) || (gyHov !== state._groundYHover);
       state._worldResizeHover = hover;
       state._obsResizeHover = oh ? oh.handle : null;
+      state._groundYHover = gyHov;
       if (cursorChanged) canvas.style.cursor = wantCursor;
       if (hoverChanged) scheduleRender();
     }, true); // capture phase so it runs before the regular mousemove
@@ -2736,6 +2797,15 @@ window.CanvasLevelEditor = (() => {
         pushHistory(true, 'Resize world');
         state._worldResizeDrag = { origW: lvl.data.worldW };
         canvas.style.cursor = 'ew-resize';
+        e.preventDefault(); e.stopPropagation(); return;
+      }
+      // Ground-Y drag handle
+      if (nearGroundYHandle(p) && state.levels[state.currentIdx]) {
+        const lvl = state.levels[state.currentIdx];
+        pushHistory(true, 'Move ground line');
+        const origGY = lvl.data.groundY != null ? lvl.data.groundY : GY;
+        state._groundYDrag = { origGY };
+        canvas.style.cursor = 'ns-resize';
         e.preventDefault(); e.stopPropagation(); return;
       }
       // Obstacle resize handle (config-driven)
@@ -2902,6 +2972,12 @@ window.CanvasLevelEditor = (() => {
         state._worldResizeDrag = null;
         canvas.style.cursor = '';
         markDirty();
+      }
+      if (state._groundYDrag) {
+        state._groundYDrag = null;
+        canvas.style.cursor = '';
+        markDirty();
+        render();
       }
       if (state._obsResizeDrag) { state._obsResizeDrag = null; canvas.style.cursor = ''; markDirty(); render(); }
       if (state.drag) { state.smartGuideX = null; state.snapGuideLines = null; }
