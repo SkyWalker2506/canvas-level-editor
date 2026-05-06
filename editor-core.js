@@ -1816,6 +1816,7 @@ window.CanvasLevelEditor = (() => {
         if (ic && ic !== document.activeElement) ic.value = 'null';
         const cn = $('current-level-name');
         if (cn) cn.textContent = '—';
+        fillPhysics(null);
         return;
       }
       const L = lvl.data;
@@ -1849,6 +1850,7 @@ window.CanvasLevelEditor = (() => {
       const ic = $('in-court');
       if (ic && ic !== document.activeElement) ic.value = lvl.courtId == null ? 'null' : String(lvl.courtId);
       set('in-slot', lvl.slot);
+      fillPhysics(L);
       const course = currentCourse();
       // v0.3: course-rule lock for any registered point entity that declares a courseRule key
       // (legacy: 'ballStartX' on first entity). Course.rules[ent.courseRule] = number locks ent.x.
@@ -1874,6 +1876,102 @@ window.CanvasLevelEditor = (() => {
       if (wwd) wwd.textContent = L.worldW;
       const oc = $('obstacle-count');
       if (oc) oc.textContent = L.obstacles.length;
+    };
+
+    // ---- Physics panel defaults (must match game.js defaults) ----
+    const PHYS_DEFAULTS = {
+      gravityY:             1.3,
+      groundFriction:       0.6,
+      groundFrictionStatic: 0.9,
+      swingPowerMax:        0.156,
+      ballRestitution:      0.52,
+      ballFriction:         0.04,
+      ballRadius:           16,
+      airDrag:              0.014,
+    };
+
+    // Sync physics panel inputs from level data (or defaults if field absent).
+    const fillPhysics = (L) => {
+      const setRange = (id, outId, val, def) => {
+        const el = $(id); if (!el) return;
+        const v = val != null ? val : def;
+        el.value = v;
+        const out = outId ? $(outId) : null;
+        if (out) out.value = parseFloat(v).toFixed(el.step && el.step.includes('.') ? el.step.split('.')[1].length : 2);
+      };
+      setRange('in-gravityY',             'out-gravityY',             L && L.gravityY,             PHYS_DEFAULTS.gravityY);
+      setRange('in-groundFriction',       'out-groundFriction',       L && L.groundFriction,       PHYS_DEFAULTS.groundFriction);
+      setRange('in-groundFrictionStatic', 'out-groundFrictionStatic', L && L.groundFrictionStatic, PHYS_DEFAULTS.groundFrictionStatic);
+      setRange('in-swingPowerMax',        'out-swingPowerMax',        L && L.swingPowerMax != null ? (L.swingPowerMax * 100 / 0.156) : null, 100);
+      setRange('in-ballRestitution',      'out-ballRestitution',      L && L.ballRestitution,      PHYS_DEFAULTS.ballRestitution);
+      setRange('in-ballFriction',         'out-ballFriction',         L && L.ballFriction,         PHYS_DEFAULTS.ballFriction);
+      setRange('in-airDrag',              'out-airDrag',              L && L.airDrag,              PHYS_DEFAULTS.airDrag);
+      const rEl = $('in-ballRadius'); if (rEl) rEl.value = (L && L.ballRadius != null) ? L.ballRadius : PHYS_DEFAULTS.ballRadius;
+    };
+
+    // Read physics panel inputs → write to level data.
+    const readPhysics = (L) => {
+      const num = (id, fallback) => { const el = $(id); return el ? (parseFloat(el.value) || fallback) : fallback; };
+      const d = PHYS_DEFAULTS;
+      const gY = num('in-gravityY', d.gravityY);
+      const gF = num('in-groundFriction', d.groundFriction);
+      const gFS = num('in-groundFrictionStatic', d.groundFrictionStatic);
+      const spm = num('in-swingPowerMax', 100); // slider 5..50 maps to scale factor
+      const br  = num('in-ballRestitution', d.ballRestitution);
+      const bf  = num('in-ballFriction', d.ballFriction);
+      const bR  = parseInt($('in-ballRadius')?.value) || d.ballRadius;
+      const ad  = num('in-airDrag', d.airDrag);
+      // Only persist when different from defaults (keeps old levels clean)
+      const setOrDel = (key, val, def) => { if (Math.abs(val - def) > 1e-9) L[key] = val; else delete L[key]; };
+      setOrDel('gravityY',             gY,  d.gravityY);
+      setOrDel('groundFriction',       gF,  d.groundFriction);
+      setOrDel('groundFrictionStatic', gFS, d.groundFrictionStatic);
+      // swingPowerMax: slider is 0-based percentage; store as raw SHOT_FORCE multiplier
+      const spmScale = spm / 100;
+      if (Math.abs(spmScale - 1.0) > 0.005) L.swingPowerMax = spmScale; else delete L.swingPowerMax;
+      setOrDel('ballRestitution',      br,  d.ballRestitution);
+      setOrDel('ballFriction',         bf,  d.ballFriction);
+      if (bR !== d.ballRadius) L.ballRadius = bR; else delete L.ballRadius;
+      setOrDel('airDrag',              ad,  d.airDrag);
+    };
+
+    const wirePhysics = () => {
+      const physIds = ['in-gravityY','in-groundFriction','in-groundFrictionStatic','in-swingPowerMax',
+                       'in-ballRestitution','in-ballFriction','in-ballRadius','in-airDrag'];
+      const outMap = {
+        'in-gravityY':'out-gravityY','in-groundFriction':'out-groundFriction',
+        'in-groundFrictionStatic':'out-groundFrictionStatic','in-swingPowerMax':'out-swingPowerMax',
+        'in-ballRestitution':'out-ballRestitution','in-ballFriction':'out-ballFriction',
+        'in-airDrag':'out-airDrag'
+      };
+      physIds.forEach(id => {
+        const el = $(id); if (!el) return;
+        el.addEventListener('input', () => {
+          const outId = outMap[id]; const out = outId ? $(outId) : null;
+          if (out) {
+            const step = el.step || '0.01';
+            const dec = step.includes('.') ? step.split('.')[1].length : 0;
+            out.value = parseFloat(el.value).toFixed(dec);
+          }
+          const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+          pushHistory();
+          readPhysics(lvl.data);
+          markDirty();
+          render();
+        });
+      });
+      // Reset buttons
+      document.querySelectorAll('.btn-reset-phys').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const field = btn.dataset.field;
+          const lvl = state.levels[state.currentIdx]; if (!lvl) return;
+          delete lvl.data[field];
+          fillPhysics(lvl.data);
+          pushHistory();
+          markDirty();
+          render();
+        });
+      });
     };
 
     const wireConfig = () => {
@@ -4137,6 +4235,7 @@ window.CanvasLevelEditor = (() => {
       if (phEl) renderPropertyPanel(phEl);
     } catch (e) { console.warn('[CanvasLevelEditor] renderPropertyPanel(propertyPanelHost) failed', e); }
     wireConfig();
+    wirePhysics();
 
     // ---------- Feature 2 (Run 2): Find & Replace obstacle positions ----------
     const wireFindReplace = () => {
