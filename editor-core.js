@@ -1724,6 +1724,10 @@ window.CanvasLevelEditor = (() => {
     const renderPalette = () => {
       const grid = $('asset-palette');
       if (!grid) return;
+      // §P15-FIX-4§ Reset left panel scroll on every palette rebuild so stale
+      // scroll position from a prior category/level doesn't show sprites above topbar.
+      const lp = document.getElementById('left-panel');
+      if (lp) lp.scrollTop = 0;
       grid.innerHTML = '';
       const course = currentCourse();
       const list = course ? course.allowed : TYPES;
