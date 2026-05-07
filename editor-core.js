@@ -4768,7 +4768,6 @@ window.CanvasLevelEditor = (() => {
       _renderOnboardStep();
     };
     $('btn-show-tutorial')?.addEventListener('click', () => startOnboarding(true));
-    setTimeout(() => startOnboarding(false), 600);
     canvas.addEventListener('mouseleave', () => {
       const tipEl = $('validation-tooltip');
       if (tipEl) tipEl.style.display = 'none';
