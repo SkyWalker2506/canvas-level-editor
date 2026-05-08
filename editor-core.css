@@ -284,10 +284,14 @@ body.is-zen #workspace { grid-template-columns: 1fr !important; }
 /* ============ ASSET PALETTE ============ */
 .asset-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 5px;
   margin-bottom: 10px;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
 }
+.asset-grid > * { min-width: 0; max-width: 100%; }
 .asset-btn {
   display: flex;
   flex-direction: column;
