@@ -79,11 +79,19 @@
       return { refresh: () => {}, destroy: () => {} };
     }
 
-    const editor          = opts.editor          || {};
-    const schema          = opts.schema          || {};
-    const typeIcons       = opts.typeIcons        || {};
-    const browserBase     = (opts.assetBrowserBase || 'https://asset-browser-golf-paper-craft.vercel.app').replace(/\/$/, '');
-    const markDirty       = typeof opts.markDirty === 'function' ? opts.markDirty : () => {};
+    const editor              = opts.editor              || {};
+    const schema              = opts.schema              || {};
+    const typeIcons           = opts.typeIcons            || {};
+    const browserBase         = (opts.assetBrowserBase || 'https://asset-browser-golf-paper-craft.vercel.app').replace(/\/$/, '');
+    const markDirty           = typeof opts.markDirty          === 'function' ? opts.markDirty          : () => {};
+    const resolveCustomType   = typeof opts.resolveCustomType  === 'function' ? opts.resolveCustomType  : () => null;
+    const resolveCustomLabel  = typeof opts.resolveCustomLabel === 'function' ? opts.resolveCustomLabel : () => null;
+
+    // Local wrapper that also fires markDirty after every override write
+    const setTypeOverrideDirty = (typeId, patch) => {
+      setTypeOverride(typeId, patch);
+      markDirty();
+    };
 
     // ------------------------------------------------------------------ DOM
     const panel = document.createElement('section');
@@ -189,10 +197,15 @@
     // -------------------------------------------------------------- Helpers
     const computeActiveType = () => {
       const st = editor.getState ? editor.getState() : null;
+      // Allow host to resolve custom asset types first
+      const custom = resolveCustomType(st);
+      if (custom) return custom;
       if (st && st.selectedKind === 'obs' && st.selectedObs >= 0) {
         const lvl = st.levels && st.levels[st.currentIdx];
         const o = lvl && lvl.data && lvl.data.obstacles && lvl.data.obstacles[st.selectedObs];
         if (o && o.type && schema[o.type]) return o.type;
+        // Also return custom-typed obstacles even if not in schema
+        if (o && o.type && o.type.startsWith('custom:')) return o.type;
       }
       const tool = st && st.tool;
       if (tool && schema[tool]) return tool;
@@ -255,7 +268,12 @@
       }
       empty.style.display = 'none';
       body.style.display  = '';
-      target.textContent  = (TYPE_LABELS[ty] || ty) + '  ·  ' + ty;
+      const customLbl = resolveCustomLabel(ty);
+      if (customLbl) {
+        target.textContent = customLbl.label + '  ·  ' + customLbl.sub;
+      } else {
+        target.textContent = (TYPE_LABELS[ty] || ty) + '  ·  ' + ty;
+      }
 
       const browserLink = document.getElementById('ap-open-browser');
       if (browserLink) {
@@ -348,7 +366,7 @@
       const py = document.getElementById('ap-pivot-y');
       const nx = clampPv(px && px.value);
       const ny = clampPv(py && py.value);
-      setTypeOverride(_activeType, { pivot: { x: nx, y: ny } });
+      setTypeOverrideDirty(_activeType, { pivot: { x: nx, y: ny } });
       markDirty();
       refreshPivotThumb();
       if (editor.render) editor.render();
@@ -370,7 +388,7 @@
         const el = document.getElementById(id);
         return el ? el.checked : false;
       });
-      setTypeOverride(_activeType, { anchors });
+      setTypeOverrideDirty(_activeType, { anchors });
       markDirty();
     });
 
@@ -379,7 +397,7 @@
       const reset = ev.target.closest('#ap-pivot-reset');
       if (!reset || !_activeType) return;
       ev.preventDefault();
-      setTypeOverride(_activeType, { pivot: { x: 0.5, y: 1.0 } });
+      setTypeOverrideDirty(_activeType, { pivot: { x: 0.5, y: 1.0 } });
       markDirty();
       refresh();
       if (editor.render) editor.render();
@@ -396,7 +414,7 @@
         const y = (e.clientY != null ? e.clientY : (e.touches && e.touches[0] && e.touches[0].clientY)) - rect.top;
         const px = clampPv(Math.round((x / rect.width) * 20) / 20);
         const py = clampPv(Math.round((y / rect.height) * 20) / 20);
-        setTypeOverride(_activeType, { pivot: { x: px, y: py } });
+        setTypeOverrideDirty(_activeType, { pivot: { x: px, y: py } });
         markDirty();
         const xi = document.getElementById('ap-pivot-x');
         const yi = document.getElementById('ap-pivot-y');
