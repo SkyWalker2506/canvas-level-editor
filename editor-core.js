@@ -4779,6 +4779,29 @@ window.CanvasLevelEditor = (() => {
       if (_isDirty) { e.preventDefault(); e.returnValue = ''; }
     });
 
+    // ---------- Cross-tab / Firebase sync ----------
+    // Firebase watchState dispatches a StorageEvent when a remote change arrives.
+    // Listen here so the editor reloads its levels from the updated localStorage
+    // value without requiring a manual page refresh.
+    window.addEventListener('storage', (e) => {
+      if (e.key !== STORAGE_KEY) return;
+      try {
+        const parsed = JSON.parse(e.newValue || 'null');
+        if (!Array.isArray(parsed)) return;
+        // Only apply if the incoming snapshot differs from what we have in memory
+        // (avoids self-echo on same-tab fires).
+        const currentRaw = JSON.stringify(state.levels);
+        if (e.newValue === currentRaw) return;
+        const prevIdx = state.currentIdx;
+        state.levels = parsed;
+        state.currentIdx = Math.max(0, Math.min(prevIdx, state.levels.length - 1));
+        state._savedSnapshot = cloneDeep(state.levels);
+        _isDirty = false;
+        render();
+        updateHistoryUI();
+      } catch (_) {}
+    });
+
     window.addEventListener('resize', () => { fitCanvas(); render(); });
     fitCanvas();
     render();
