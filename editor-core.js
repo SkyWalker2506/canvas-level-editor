@@ -1721,13 +1721,14 @@ window.CanvasLevelEditor = (() => {
       });
       return b;
     };
-    const renderPalette = () => {
+    const renderPalette = ({ resetScroll = false } = {}) => {
       const grid = $('asset-palette');
       if (!grid) return;
-      // §P15-FIX-4§ Reset left panel scroll on every palette rebuild so stale
-      // scroll position from a prior category/level doesn't show sprites above topbar.
+      // §P15-FIX-4§ Reset left panel scroll only on explicit course/level switches
+      // so periodic re-renders (asset-sync, realtime storage events) don't snap
+      // the user back to the top while they're browsing the palette.
       const lp = document.getElementById('left-panel');
-      if (lp) lp.scrollTop = 0;
+      if (lp && resetScroll) lp.scrollTop = 0;
       grid.innerHTML = '';
       const course = currentCourse();
       const list = course ? course.allowed : TYPES;
@@ -3663,7 +3664,7 @@ window.CanvasLevelEditor = (() => {
       clearSync();
     });
     $('filter-court').addEventListener('change', () => {
-      renderLevelList(); renderSlotGrid(); renderPalette(); saveSettings();
+      renderLevelList(); renderSlotGrid(); renderPalette({ resetScroll: true }); saveSettings();
       const sel = $('filter-court').value;
       if (sel && sel !== 'all' && sel !== 'null') {
         const courseId = parseInt(sel, 10);
