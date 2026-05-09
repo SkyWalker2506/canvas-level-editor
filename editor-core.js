@@ -331,10 +331,17 @@ window.CanvasLevelEditor = (() => {
 
     // ---------- rAF-batched render ----------
     let _rafPending = false;
-    const scheduleRender = () => {
+    let _rafRenderPalette = true;
+    const scheduleRender = ({ renderPalette = true } = {}) => {
+      _rafRenderPalette = _rafRenderPalette && renderPalette;
       if (_rafPending) return;
       _rafPending = true;
-      requestAnimationFrame(() => { _rafPending = false; render(); });
+      requestAnimationFrame(() => {
+        const nextRenderPalette = _rafRenderPalette;
+        _rafPending = false;
+        _rafRenderPalette = true;
+        render({ renderPalette: nextRenderPalette });
+      });
     };
 
     // ---------- Storage ----------
@@ -2882,7 +2889,7 @@ window.CanvasLevelEditor = (() => {
       if (!h) {
         if (!e.shiftKey) { state.selectedKind = null; state.selectedObs = -1; state.selectedObsList = []; }
         state.marquee = { startX: p.x, startY: p.y, endX: p.x, endY: p.y, additive: e.shiftKey };
-        render();
+        render({ renderPalette: false });
         return;
       }
       state.selectedKind = h.kind;
@@ -2913,7 +2920,7 @@ window.CanvasLevelEditor = (() => {
       }
       pushHistory(true);
       state.drag = { kind: h.kind, entityId: _hitEnt ? _hitEnt.id : null, index: h.index, startX: p.x, startY: p.y, origX, origY };
-      render();
+      render({ renderPalette: false });
     });
 
     canvas.addEventListener('mousemove', (e) => {
@@ -3006,16 +3013,16 @@ window.CanvasLevelEditor = (() => {
         canvas.style.cursor = '';
         markDirty();
       }
-      if (state._obsResizeDrag) { state._obsResizeDrag = null; canvas.style.cursor = ''; markDirty(); render(); }
+      if (state._obsResizeDrag) { state._obsResizeDrag = null; canvas.style.cursor = ''; markDirty(); render({ renderPalette: false }); }
       if (state.drag) { state.smartGuideX = null; state.snapGuideLines = null; }
       state.drag = null;
       if (state.marquee) {
         const m = state.marquee; state.marquee = null;
         const x1 = Math.min(m.startX, m.endX), x2 = Math.max(m.startX, m.endX);
         const y1 = Math.min(m.startY, m.endY), y2 = Math.max(m.startY, m.endY);
-        if (x2 - x1 < 4 && y2 - y1 < 4) { render(); return; }
+        if (x2 - x1 < 4 && y2 - y1 < 4) { render({ renderPalette: false }); return; }
         const lvl = state.levels[state.currentIdx];
-        if (!lvl) { render(); return; }
+        if (!lvl) { render({ renderPalette: false }); return; }
         const picks = [];
         const candidates = (_spatial.count > 0 && _spatial.levelRef === lvl)
           ? queryRect(x1, y1, x2, y2)
@@ -3035,7 +3042,7 @@ window.CanvasLevelEditor = (() => {
           state.selectedObs = state.selectedObsList[state.selectedObsList.length - 1];
           toast(`${state.selectedObsList.length} selected`);
         }
-        render();
+        render({ renderPalette: false });
       }
     });
 
@@ -4061,7 +4068,7 @@ window.CanvasLevelEditor = (() => {
     };
 
     // ---------- Main render ----------
-    const render = () => {
+    const render = ({ renderPalette: shouldRenderPalette = true } = {}) => {
       emit('obstacleSelect', { obs: state.selectedObs, kind: state.selectedKind });
       resizeCanvas();
       renderCanvas();
@@ -4070,7 +4077,7 @@ window.CanvasLevelEditor = (() => {
       renderLevelList();
       renderSlotGrid();
       renderValidation();
-      renderPalette();
+      if (shouldRenderPalette) renderPalette();
       renderPrefabs();
       bindConfig();
       renderProps();
