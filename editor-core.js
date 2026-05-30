@@ -330,17 +330,29 @@ window.CanvasLevelEditor = (() => {
     const snap = (v) => state.snap ? Math.round(v / state.gridSize) * state.gridSize : Math.round(v);
 
     // ---------- rAF-batched render ----------
+    // §PERF_CANVAS_ONLY§ Two-tier render system:
+    //   canvasOnly=true  → only resizeCanvas + renderCanvas + rebuildSpatialIndex.
+    //                      Used during drag / pan / hover so DOM panels are NOT
+    //                      rebuilt 60× per second. Elapsed per frame: ~canvas draw only.
+    //   canvasOnly=false → full render (canvas + all DOM panels). Used after selection
+    //                      change, level load, property edit, add/delete obstacle, etc.
+    // scheduleRender coalesces into one rAF. If a full-render and a canvas-only render
+    // are both queued in the same frame, full-render wins (canvasOnly AND-ed together).
     let _rafPending = false;
     let _rafRenderPalette = true;
-    const scheduleRender = ({ renderPalette = true } = {}) => {
+    let _rafCanvasOnly = true; // starts true; AND-ed each call; one full render wins
+    const scheduleRender = ({ renderPalette = true, canvasOnly = false } = {}) => {
       _rafRenderPalette = _rafRenderPalette && renderPalette;
+      _rafCanvasOnly = _rafCanvasOnly && canvasOnly; // full-render wins over canvas-only
       if (_rafPending) return;
       _rafPending = true;
       requestAnimationFrame(() => {
         const nextRenderPalette = _rafRenderPalette;
+        const nextCanvasOnly = _rafCanvasOnly;
         _rafPending = false;
         _rafRenderPalette = true;
-        render({ renderPalette: nextRenderPalette });
+        _rafCanvasOnly = true;
+        render({ renderPalette: nextRenderPalette, canvasOnly: nextCanvasOnly });
       });
     };
 
@@ -818,16 +830,15 @@ window.CanvasLevelEditor = (() => {
         }
       }
 
-      // Grid
+      // Grid — batched into two strokes (one for minor lines, one for GY line)
+      // Avoids per-line stroke() calls that flush the GPU command queue each time.
       if (state.showGrid) {
         ctx.strokeStyle = 'rgba(0,0,0,0.08)';
         ctx.lineWidth = 1;
-        for (let gx = 0; gx <= W; gx += GRID) {
-          ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, CANVAS_H); ctx.stroke();
-        }
-        for (let gy = 0; gy <= CANVAS_H; gy += GRID) {
-          ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke();
-        }
+        ctx.beginPath();
+        for (let gx = 0; gx <= W; gx += GRID) { ctx.moveTo(gx, 0); ctx.lineTo(gx, CANVAS_H); }
+        for (let gy = 0; gy <= CANVAS_H; gy += GRID) { ctx.moveTo(0, gy); ctx.lineTo(W, gy); }
+        ctx.stroke();
         ctx.strokeStyle = 'rgba(0,0,0,0.2)';
         ctx.beginPath(); ctx.moveTo(0, GY); ctx.lineTo(W, GY); ctx.stroke();
       }
@@ -2458,7 +2469,7 @@ window.CanvasLevelEditor = (() => {
             const val = noteEl.value;
             if (val) o._note = val;
             else delete o._note;
-            scheduleRender();
+            scheduleRender({ canvasOnly: true }); // note dot is canvas-only
           });
         }
         $('prop-delete').addEventListener('click', deleteSelected);
@@ -2805,7 +2816,7 @@ window.CanvasLevelEditor = (() => {
             });
           } catch (_) {}
         }
-        scheduleRender();
+        scheduleRender({ canvasOnly: true }); // §PERF_CANVAS_ONLY§ resize drag
         e.stopPropagation();
         return;
       }
@@ -2816,7 +2827,7 @@ window.CanvasLevelEditor = (() => {
         lvl.data.worldW = newW;
         const ww = $('in-worldW'); if (ww) ww.value = newW;
         const wwd = $('world-width-display'); if (wwd) wwd.textContent = newW;
-        resizeCanvas(); scheduleRender();
+        resizeCanvas(); scheduleRender({ canvasOnly: true }); // §PERF_CANVAS_ONLY§ world resize drag
         e.stopPropagation(); return;
       }
       const p = canvasPt(e);
@@ -2828,7 +2839,7 @@ window.CanvasLevelEditor = (() => {
       state._worldResizeHover = hover;
       state._obsResizeHover = oh ? oh.handle : null;
       if (cursorChanged) canvas.style.cursor = wantCursor;
-      if (hoverChanged) scheduleRender();
+      if (hoverChanged) scheduleRender({ canvasOnly: true }); // §PERF_CANVAS_ONLY§ handle hover
     }, true); // capture phase so it runs before the regular mousemove
 
     canvas.addEventListener('mousedown', (e) => {
@@ -2916,6 +2927,16 @@ window.CanvasLevelEditor = (() => {
       } else {
         const o = lvl.data.obstacles[h.index];
         origX = o.x ?? o.x1 ?? 0;
+        // Materialize o.y before drag so that '`y` in o' is true during mousemove.
+        // Obstacles like rock/mud/tree omit `y` from their schema default; we
+        // initialize it here from the plugin's initObstacleY callback (which knows
+        // the correct visual Y for each type) so dragging works on the first move.
+        if (!('y' in o)) {
+          if (config.initObstacleY) {
+            o.y = config.initObstacleY(o, GY);
+          }
+          // If no callback, leave o.y undefined so legacy non-Y types are unchanged.
+        }
         origY = o.y ?? 0;
       }
       pushHistory(true);
@@ -2952,8 +2973,8 @@ window.CanvasLevelEditor = (() => {
       } else if (tipEl) {
         tipEl.style.display = 'none';
       }
-      if (state.pendingPrefab) { state.pendingPrefabX = Math.round(p.x - LEFT_PAD); scheduleRender(); return; }
-      if (state.marquee) { state.marquee.endX = p.x; state.marquee.endY = p.y; scheduleRender(); return; }
+      if (state.pendingPrefab) { state.pendingPrefabX = Math.round(p.x - LEFT_PAD); scheduleRender({ canvasOnly: true }); return; } // §PERF_CANVAS_ONLY§ prefab cursor
+      if (state.marquee) { state.marquee.endX = p.x; state.marquee.endY = p.y; scheduleRender({ canvasOnly: true }); return; } // §PERF_CANVAS_ONLY§ marquee
       if (!state.drag) return;
       const lvl = state.levels[state.currentIdx]; if (!lvl) return;
       let dx = p.x - state.drag.startX;
@@ -3004,7 +3025,7 @@ window.CanvasLevelEditor = (() => {
           }
         });
       }
-      scheduleRender();
+      scheduleRender({ canvasOnly: true }); // §PERF_CANVAS_ONLY§ obstacle drag
     });
 
     window.addEventListener('mouseup', () => {
@@ -4068,12 +4089,16 @@ window.CanvasLevelEditor = (() => {
     };
 
     // ---------- Main render ----------
-    const render = ({ renderPalette: shouldRenderPalette = true } = {}) => {
-      emit('obstacleSelect', { obs: state.selectedObs, kind: state.selectedKind });
+    const render = ({ renderPalette: shouldRenderPalette = true, canvasOnly = false } = {}) => {
+      // §PERF_CANVAS_ONLY§ During drag/pan, canvasOnly=true skips all DOM panel
+      // rebuilds (level list, props, palette, minimap, bindConfig, status strip,
+      // sync payload). Only the canvas + spatial index are updated.
       resizeCanvas();
       renderCanvas();
       // Rebuild spatial index now that obstacle _bbox values are fresh from drawObstacle
       rebuildSpatialIndex();
+      if (canvasOnly) return; // skip all DOM work — canvas is the only change
+      emit('obstacleSelect', { obs: state.selectedObs, kind: state.selectedKind });
       renderLevelList();
       renderSlotGrid();
       renderValidation();
